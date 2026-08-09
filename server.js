@@ -10061,9 +10061,7 @@ app.post("/laboratory/analyses", authenticateToken, async (req, res) => {
         patient_instructions,
         estimated_duration || sampling_condition,
         on_site_available,
-        teleconsultation_available,
-        category,
-        sampling_condition || estimated_duration
+        teleconsultation_available
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -10114,7 +10112,9 @@ app.put("/laboratory/analyses/:id", authenticateToken, async (req, res) => {
         req.params.id,
         estimated_duration,
         on_site_available,
-        teleconsultation_available
+        teleconsultation_available,
+        category,
+        sampling_condition || estimated_duration
       ]
     );
     if (!result.rows[0]) return res.status(404).json({ error: "Analyse introuvable." });
@@ -10698,7 +10698,10 @@ app.get("/laboratories/public/:id", async (req, res) => {
     if (!lab.rows[0]) return res.status(404).json({ error: "Laboratoire introuvable." });
     await ensureDefaultLaboratoryAnalyses(lab.rows[0].company_id);
     const analyses = await pool.query(
-      `SELECT *
+      `SELECT id, company_id, name, description, category, result_delay,
+              sampling_condition, patient_instructions, is_available,
+              home_sampling_available, on_site_available, estimated_duration,
+              teleconsultation_available
        FROM laboratory_analyses
        WHERE company_id=$1 AND is_available=true
        ORDER BY name ASC`,
@@ -18450,6 +18453,7 @@ try {
   console.error("❌ Communication Advanced erreur:", e.message);
 }
 
-app.listen(process.env.PORT || 5050, () => {
-  console.log("Backend sécurisé démarré sur le port 5050");
+const PORT = process.env.PORT || 5050;
+app.listen(PORT, () => {
+  console.log(`Backend sécurisé démarré sur le port ${PORT}`);
 });
