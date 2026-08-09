@@ -9721,11 +9721,84 @@ app.put("/marketplace/customers/profile", authenticateToken, async (req, res) =>
 
 function canManageLaboratory(user) {
   const role = normalizeRole(user?.role);
-  return isSuperAdminUser(user) || ["admin", "directeur", "direction", "laboratoire", "employe_laboratoire", "comptable"].includes(role);
+  return isSuperAdminUser(user) || ["admin", "directeur", "direction", "directrice", "laboratoire", "employe_laboratoire", "technicien_labo", "responsable_laboratoire", "biologiste", "secretaire", "comptable", "comptable_hafiya"].includes(role);
 }
 
 function generateLaboratoryResultCode() {
   return `LAB-${new Date().getFullYear()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+}
+
+const DEFAULT_LABORATORY_ANALYSES = [
+  ["NFS", "Hématologie", "Prélèvement sanguin", "24h"],
+  ["Glycémie", "Biochimie", "À jeun si demandé par le médecin", "24h"],
+  ["Créatinine", "Biochimie", "Prélèvement sanguin", "24h"],
+  ["Urée", "Biochimie", "Prélèvement sanguin", "24h"],
+  ["Transaminases", "Biochimie", "Prélèvement sanguin", "24h"],
+  ["Cholestérol total", "Bilan lipidique", "À jeun recommandé", "24h"],
+  ["HDL", "Bilan lipidique", "À jeun recommandé", "24h"],
+  ["LDL", "Bilan lipidique", "À jeun recommandé", "24h"],
+  ["Triglycérides", "Bilan lipidique", "À jeun recommandé", "24h"],
+  ["Groupe sanguin", "Immuno-hématologie", "Prélèvement sanguin", "24h"],
+  ["Test paludisme", "Parasitologie", "Prélèvement sanguin", "Le jour même"],
+  ["CRP", "Inflammation", "Prélèvement sanguin", "24h"],
+  ["VS", "Inflammation", "Prélèvement sanguin", "24h"],
+  ["TSH", "Hormones", "Prélèvement sanguin", "24h à 48h"],
+  ["HCG", "Hormones", "Prélèvement sanguin ou urinaire", "24h"],
+  ["ECBU", "Bactériologie", "Urines dans un flacon stérile", "24h à 48h"],
+  ["Sérologie VIH", "Sérologie", "Prélèvement sanguin", "24h à 48h"],
+  ["Hépatite B", "Sérologie", "Prélèvement sanguin", "24h à 48h"],
+  ["Hépatite C", "Sérologie", "Prélèvement sanguin", "24h à 48h"],
+  ["Bilan lipidique", "Bilan", "À jeun recommandé", "24h"],
+  ["Bilan hépatique", "Bilan", "Prélèvement sanguin", "24h"],
+  ["Bilan rénal", "Bilan", "Prélèvement sanguin", "24h"],
+];
+
+async function ensureDefaultLaboratoryAnalyses(companyId) {
+  if (!companyId) return;
+  await pool.query("ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS category TEXT DEFAULT ''");
+  await pool.query("ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS sampling_condition TEXT DEFAULT ''");
+  const existing = await pool.query("SELECT COUNT(*)::int AS count FROM laboratory_analyses WHERE company_id=$1", [companyId]);
+  if (Number(existing.rows[0]?.count || 0) > 0) return;
+
+  for (const [name, category, samplingCondition, delay] of DEFAULT_LABORATORY_ANALYSES) {
+    await pool.query(
+      `INSERT INTO laboratory_analyses
+       (company_id, name, category, sampling_condition, description, price, result_delay, is_available, on_site_available, is_standard)
+       SELECT $1,$2,$3,$4,$4,0,$5,true,true,true
+       WHERE NOT EXISTS (
+         SELECT 1 FROM laboratory_analyses
+         WHERE company_id=$1 AND LOWER(name)=LOWER($2)
+       )`,
+      [companyId, name, category, samplingCondition, delay]
+    );
+  }
+}
+
+async function notifyLaboratoryUsers(companyId, payload) {
+  const users = await pool.query(
+    `SELECT id FROM users
+     WHERE company_id=$1
+       AND is_active IS DISTINCT FROM false
+       AND (is_super_admin=true OR LOWER(role) = ANY($2::text[]))`,
+    [companyId, ["super_admin", "admin", "direction", "directrice", "secretaire", "technicien_labo", "responsable_laboratoire", "biologiste"]]
+  );
+
+  for (const user of users.rows) {
+    await createNotification({ user_id: user.id, company_id: companyId, ...payload });
+  }
+}
+
+function buildAppointmentNotificationMessage(appointment) {
+  const analyses = appointment.analysis_name || "vos analyses";
+  const date = appointment.proposed_date || appointment.requested_date || "la date demandée";
+  const time = appointment.proposed_time || appointment.requested_time || "l’heure demandée";
+  if (isAcceptedLabStatus(appointment.status)) {
+    return `Bonjour ${appointment.patient_name || ""}, votre rendez-vous HAFIYA pour ${analyses} est accepté pour le ${date} à ${time}. Merci.`;
+  }
+  if (String(appointment.status || "").toLowerCase().includes("refus")) {
+    return `Bonjour ${appointment.patient_name || ""}, votre demande de rendez-vous HAFIYA pour ${analyses} a été refusée. Merci de contacter le laboratoire.`;
+  }
+  return `Bonjour ${appointment.patient_name || ""}, votre rendez-vous HAFIYA pour ${analyses} est mis à jour : ${appointment.status}.`;
 }
 
 
@@ -9934,6 +10007,7 @@ app.get("/laboratory/analyses", authenticateToken, async (req, res) => {
   try {
     if (!canManageLaboratory(req.user)) return res.status(403).json({ error: "Accès laboratoire refusé." });
     const companyId = getEffectiveCompanyId(req);
+    await ensureDefaultLaboratoryAnalyses(companyId);
     const result = await pool.query(
       `SELECT *
        FROM laboratory_analyses
@@ -9954,6 +10028,8 @@ app.post("/laboratory/analyses", authenticateToken, async (req, res) => {
     const companyId = getEffectiveCompanyId(req);
     const {
       name,
+      category = "",
+      sampling_condition = "",
       description = "",
       price = 0,
       result_delay = "",
@@ -9967,23 +10043,27 @@ app.post("/laboratory/analyses", authenticateToken, async (req, res) => {
     if (!name) return res.status(400).json({ error: "Nom analyse obligatoire." });
     const result = await pool.query(
       `INSERT INTO laboratory_analyses
-       (company_id, name, description, price, result_delay, is_available ?? true,
+       (company_id, name, category, sampling_condition, description, price, result_delay, is_available,
         home_sampling_available, patient_instructions, estimated_duration,
         on_site_available, teleconsultation_available)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [
         companyId,
         name,
+        category,
+        sampling_condition || estimated_duration,
         description,
         Number(price || 0),
         result_delay,
         is_available ?? true,
         home_sampling_available,
         patient_instructions,
-        estimated_duration,
+        estimated_duration || sampling_condition,
         on_site_available,
-        teleconsultation_available
+        teleconsultation_available,
+        category,
+        sampling_condition || estimated_duration
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -9999,6 +10079,8 @@ app.put("/laboratory/analyses/:id", authenticateToken, async (req, res) => {
     const companyId = getEffectiveCompanyId(req);
     const {
       name = "",
+      category = "",
+      sampling_condition = "",
       description = "",
       price = 0,
       result_delay = "",
@@ -10015,7 +10097,8 @@ app.put("/laboratory/analyses/:id", authenticateToken, async (req, res) => {
            result_delay=$4, is_available=$5, home_sampling_available=$6,
            patient_instructions=$7, company_id=COALESCE(company_id,$8),
            estimated_duration=$10, on_site_available=$11,
-           teleconsultation_available=$12,
+           teleconsultation_available=$12, category=$13,
+           sampling_condition=$14,
            updated_at=CURRENT_TIMESTAMP
        WHERE id=$9 AND (company_id=$8 OR company_id IS NULL)
        RETURNING *`,
@@ -10204,7 +10287,17 @@ app.post("/laboratory/appointments", async (req, res) => {
         service_type
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const appointment = result.rows[0];
+    await notifyLaboratoryUsers(companyId, {
+      title: "Nouveau rendez-vous HAFIYA",
+      message: `Nouvelle demande de ${patient_name || "patient"} pour ${appointment.analysis_name || selectedNames}.`,
+      type: "laboratory_appointment",
+      priority: "high",
+      related_entity_type: "laboratory_appointment",
+      related_entity_id: appointment.id,
+      action_url: "/laboratoire/rendez-vous"
+    }).catch((error) => console.error("ERREUR NOTIF RDV LAB :", error));
+    res.status(201).json({ ...appointment, notification_ready: true });
   } catch (error) {
     console.error("ERREUR CREATE LAB APPOINTMENT :", error);
     res.status(500).json({ error: "Erreur demande rendez-vous laboratoire" });
@@ -10259,7 +10352,21 @@ app.put("/laboratory/appointments/:id/status", authenticateToken, async (req, re
       await createPatientFromAcceptedAppointment(updatedAppointment.id);
     }
 
-    res.json(updatedAppointment);
+    const readyMessage = buildAppointmentNotificationMessage(updatedAppointment);
+    if (updatedAppointment.client_user_id) {
+      await createNotification({
+        user_id: updatedAppointment.client_user_id,
+        company_id: updatedAppointment.company_id,
+        title: `Rendez-vous ${updatedAppointment.status}`,
+        message: readyMessage,
+        type: "client_laboratory_appointment",
+        related_entity_type: "laboratory_appointment",
+        related_entity_id: updatedAppointment.id,
+        action_url: "/client/laboratoire/rendez-vous"
+      }).catch((error) => console.error("ERREUR NOTIF CLIENT RDV :", error));
+    }
+
+    res.json({ ...updatedAppointment, notification_ready: true, notification_message: readyMessage });
   } catch (error) {
     console.error("ERREUR UPDATE LAB APPOINTMENT :", error);
     res.status(500).json({ error: "Erreur statut rendez-vous" });
@@ -10589,6 +10696,7 @@ app.get("/laboratories/public/:id", async (req, res) => {
   try {
     const lab = await pool.query("SELECT * FROM laboratory_settings WHERE id=$1 AND is_published=true AND is_active=true", [req.params.id]);
     if (!lab.rows[0]) return res.status(404).json({ error: "Laboratoire introuvable." });
+    await ensureDefaultLaboratoryAnalyses(lab.rows[0].company_id);
     const analyses = await pool.query(
       `SELECT *
        FROM laboratory_analyses
@@ -13510,7 +13618,12 @@ app.put("/chat/messages/:id/read", authenticateToken, async (req, res) => {
   }
 });
 
-app.get("/notifications/:userId", authenticateToken, async (req, res) => {
+app.get("/notifications", authenticateToken, async (req, res) => {
+  req.params.userId = String(req.user.id);
+  return notificationsForUserHandler(req, res);
+});
+
+async function notificationsForUserHandler(req, res) {
   try {
     const companyId = req.user.company_id;
     const isSuperAdmin = req.user.is_super_admin === true;
@@ -13546,9 +13659,11 @@ app.get("/notifications/:userId", authenticateToken, async (req, res) => {
       error: "Erreur lecture notifications"
     });
   }
-});
+}
 
-app.put("/notifications/:id/read", authenticateToken, async (req, res) => {
+app.get("/notifications/:userId", authenticateToken, notificationsForUserHandler);
+
+async function markNotificationReadHandler(req, res) {
   try {
     const companyId = req.user.company_id;
     const isSuperAdmin = req.user.is_super_admin === true;
@@ -13577,7 +13692,10 @@ app.put("/notifications/:id/read", authenticateToken, async (req, res) => {
       error: "Erreur notification lue"
     });
   }
-});
+}
+
+app.post("/notifications/:id/read", authenticateToken, markNotificationReadHandler);
+app.put("/notifications/:id/read", authenticateToken, markNotificationReadHandler);
 
 app.post("/meetings", authenticateToken, async (req, res) => {
   try {
@@ -15528,91 +15646,72 @@ app.post("/assistant/query", authenticateToken, async (req, res) => {
   }
 });
 
-/* ASSISTANT IA OPENROUTER */
+/* ASSISTANT IA HAFIYA */
 app.post("/ai/chat", authenticateToken, async (req, res) => {
   try {
-    const { message, user } = req.body;
+    const message = String(req.body?.message || "").trim().slice(0, 1200);
+    if (!message) return res.status(400).json({ error: "Message obligatoire" });
 
-    if (!message || String(message).trim() === "") {
-      return res.status(400).json({
-        error: "Message obligatoire"
+    const companyId = getEffectiveCompanyId(req);
+    const role = normalizeRole(req.user?.role);
+    const labStats = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM laboratory_appointments WHERE company_id=$1) AS appointments,
+         (SELECT COUNT(*)::int FROM laboratory_patients WHERE company_id=$1) AS patients,
+         (SELECT COUNT(*)::int FROM laboratory_cases WHERE company_id=$1) AS cases,
+         (SELECT COUNT(*)::int FROM laboratory_analyses WHERE company_id=$1 AND is_available=true) AS analyses`,
+      [companyId]
+    ).catch(() => ({ rows: [{ appointments: 0, patients: 0, cases: 0, analyses: 0 }] }));
+
+    const systemPrompt =
+      "Tu es l'assistant IA officiel de HAFIYA Laboratoire. Réponds en français simple, professionnel et court. Aide sur analyses, rendez-vous, résultats, patients, documents, notifications, pointage, badges, paramètres et communication interne. Respecte strictement le tenant connecté: ne révèle jamais les données d'une autre entreprise et n'invente pas de données patient.";
+    const context = labStats.rows[0] || {};
+
+    if (process.env.OPENAI_API_KEY) {
+      const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Rôle utilisateur: ${role}. Stats tenant HAFIYA: ${JSON.stringify(context)}. Question: ${message}` }
+          ],
+          temperature: 0.3,
+          max_tokens: 600
+        })
       });
+      const data = await aiResponse.json().catch(() => ({}));
+      if (aiResponse.ok) return res.json({ answer: data?.choices?.[0]?.message?.content || "Je n’ai pas pu générer une réponse." });
     }
 
-    if (!process.env.OPENROUTER_API_KEY) {
-      return res.json({
-        answer:
-          "Assistant IA non configuré. Ajoutez OPENROUTER_API_KEY dans le fichier .env. En attendant, je peux vous conseiller de vérifier les produits, stocks, mouvements, alertes, documents et rapports depuis le menu HAFIYA Laboratoire."
-      });
-    }
-
-    const companyId = user?.company_id || null;
-    const isSuperAdmin = user?.is_super_admin === true;
-    const contextValues = isSuperAdmin || !companyId ? [] : [companyId];
-    const companyClause = isSuperAdmin || !companyId ? "" : "WHERE company_id=$1";
-    const movementClause = isSuperAdmin || !companyId ? "" : "WHERE company_id=$1";
-    const productStats = await pool.query(
-      `SELECT COUNT(*)::int AS total,
-              COALESCE(SUM(stock),0)::int AS stock_total,
-              COUNT(*) FILTER (WHERE stock <= minimum_stock)::int AS alertes
-       FROM products ${companyClause}`,
-      contextValues
-    );
-    const movementStats = await pool.query(
-      `SELECT COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE status='En attente')::int AS en_attente
-       FROM stock_movements ${movementClause}`,
-      contextValues
-    );
-
-    const aiResponse = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
+    if (process.env.OPENROUTER_API_KEY) {
+      const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
           "Content-Type": "application/json",
-          "HTTP-Referer": "http://localhost:3000",
+          "HTTP-Referer": process.env.APP_URL || "https://hafiyalab.com",
           "X-Title": "HAFIYA Laboratoire"
         },
         body: JSON.stringify({
           model: "openrouter/auto",
           messages: [
-            {
-              role: "system",
-              content:
-                "Tu es l'assistant IA officiel de HAFIYA Laboratoire. Tu aides les utilisateurs en français simple et professionnel. Tu es spécialisé en logistique, gestion de stock, entreposage, transport, inventaire, documents logistiques, pointage, RH, tableaux de bord et organisation opérationnelle. Tu dois répondre clairement, étape par étape, sans inventer de données internes si elles ne sont pas fournies."
-            },
-            {
-              role: "user",
-              content: `Utilisateur connecté : ${user?.fullname || "Utilisateur"} | Rôle : ${user?.role || "non défini"}\nContexte WMS réel résumé : produits=${productStats.rows[0]?.total || 0}, stock_total=${productStats.rows[0]?.stock_total || 0}, alertes_stock=${productStats.rows[0]?.alertes || 0}, mouvements=${movementStats.rows[0]?.total || 0}, mouvements_en_attente=${movementStats.rows[0]?.en_attente || 0}.\n\nQuestion : ${message}`
-            }
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Rôle utilisateur: ${role}. Stats tenant HAFIYA: ${JSON.stringify(context)}. Question: ${message}` }
           ]
         })
-      }
-    );
-
-    const data = await aiResponse.json();
-
-    if (!aiResponse.ok) {
-      return res.status(500).json({
-        error: "Erreur OpenRouter",
-        details: data
       });
+      const data = await aiResponse.json().catch(() => ({}));
+      if (aiResponse.ok) return res.json({ answer: data?.choices?.[0]?.message?.content || "Je n’ai pas pu générer une réponse." });
     }
 
-    const answer =
-      data?.choices?.[0]?.message?.content ||
-      "Je n'ai pas pu générer une réponse.";
-
-    res.json({
-      answer
+    return res.json({
+      answer: "Assistant IA non configuré. La clé OpenAI n’est pas disponible pour l’instant. Je peux déjà vous rappeler les modules HAFIYA : analyses, rendez-vous, patients, résultats, documents, pointage, badges, notifications et communication interne."
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({
-      error: "Erreur assistant IA"
-    });
+    console.error("ERREUR IA HAFIYA :", error);
+    res.status(500).json({ error: "Erreur assistant IA" });
   }
 });
 

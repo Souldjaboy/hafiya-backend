@@ -18,7 +18,7 @@ module.exports = function(app, pool, authenticateToken) {
 
   const upload = multer({ storage });
 
-  app.post("/api/communication/upload-voice", authenticateToken, upload.single("file"), async (req, res) => {
+  app.post("/communication/upload-voice", authenticateToken, upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "Fichier manquant" });
     res.json({
       url: `/uploads/chat-media/${req.file.filename}`,
@@ -26,7 +26,7 @@ module.exports = function(app, pool, authenticateToken) {
     });
   });
 
-  app.post("/api/communication/conversations/:id/voice", authenticateToken, async (req, res) => {
+  app.post("/communication/conversations/:id/voice", authenticateToken, async (req, res) => {
     const { media_url, media_mime, duration } = req.body;
     const r = await pool.query(`
       INSERT INTO chat_messages_v2
@@ -37,7 +37,7 @@ module.exports = function(app, pool, authenticateToken) {
     res.json(r.rows[0]);
   });
 
-  app.post("/api/communication/call-signal", authenticateToken, async (req, res) => {
+  app.post("/communication/call-signal", authenticateToken, async (req, res) => {
     const { conversation_id, receiver_id, signal_type, payload } = req.body;
 
     const r = await pool.query(`
@@ -50,7 +50,7 @@ module.exports = function(app, pool, authenticateToken) {
     res.json(r.rows[0]);
   });
 
-  app.get("/api/communication/call-signals", authenticateToken, async (req, res) => {
+  app.get("/communication/call-signals", authenticateToken, async (req, res) => {
     const since = Number(req.query.since || 0);
 
     const r = await pool.query(`

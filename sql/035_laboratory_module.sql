@@ -1,4 +1,4 @@
--- Triangle WMS Pro - Module Laboratoire
+-- HAFIYA Laboratoire - Module Laboratoire
 -- Migration additive uniquement. Ne supprime aucune donnee.
 
 CREATE TABLE IF NOT EXISTS laboratory_settings (
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS laboratory_analyses (
   company_id INTEGER,
   name TEXT NOT NULL,
   description TEXT DEFAULT '',
+  category TEXT DEFAULT '',
+  sampling_condition TEXT DEFAULT '',
   price NUMERIC(14,2) DEFAULT 0,
   result_delay TEXT DEFAULT '',
   is_available BOOLEAN DEFAULT true,
@@ -201,3 +203,6 @@ SELECT
 WHERE NOT EXISTS (
   SELECT 1 FROM ai_module_knowledge WHERE module_key='laboratoire'
 );
+
+ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS category TEXT DEFAULT '';
+ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS sampling_condition TEXT DEFAULT '';

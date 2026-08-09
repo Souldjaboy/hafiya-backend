@@ -1,5 +1,5 @@
 module.exports = function(app, pool, authenticateToken) {
-  app.get("/api/communication/conversations", authenticateToken, async (req, res) => {
+  app.get("/communication/conversations", authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const r = await pool.query(`
       SELECT c.*
@@ -11,7 +11,7 @@ module.exports = function(app, pool, authenticateToken) {
     res.json(r.rows);
   });
 
-  app.post("/api/communication/conversations", authenticateToken, async (req, res) => {
+  app.post("/communication/conversations", authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const { type, name, members } = req.body;
 
@@ -34,7 +34,7 @@ module.exports = function(app, pool, authenticateToken) {
     res.json(c.rows[0]);
   });
 
-  app.get("/api/communication/conversations/:id/messages", authenticateToken, async (req, res) => {
+  app.get("/communication/conversations/:id/messages", authenticateToken, async (req, res) => {
     const r = await pool.query(`
       SELECT m.*, u.fullname AS sender_name, u.role AS sender_role
       FROM chat_messages_v2 m
@@ -45,7 +45,7 @@ module.exports = function(app, pool, authenticateToken) {
     res.json(r.rows);
   });
 
-  app.post("/api/communication/conversations/:id/messages", authenticateToken, async (req, res) => {
+  app.post("/communication/conversations/:id/messages", authenticateToken, async (req, res) => {
     const r = await pool.query(`
       INSERT INTO chat_messages_v2(conversation_id, sender_id, message)
       VALUES($1,$2,$3)

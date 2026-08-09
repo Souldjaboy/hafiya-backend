@@ -1,4 +1,6 @@
--- Triangle WMS Pro - Rendez-vous laboratoire multi-analyses
+ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS category TEXT DEFAULT '';
+ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS sampling_condition TEXT DEFAULT '';
+-- HAFIYA Laboratoire - Rendez-vous laboratoire multi-analyses
 
 ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS estimated_duration TEXT DEFAULT '';
 ALTER TABLE laboratory_analyses ADD COLUMN IF NOT EXISTS on_site_available BOOLEAN DEFAULT true;
