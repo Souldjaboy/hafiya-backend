@@ -1211,12 +1211,13 @@ async function createNotification({
   assigned_to = null,
   warehouse_id = null
 }) {
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO notifications
      (user_id, title, message, type, company_id, status, priority,
       related_entity_type, related_entity_id, action_url, created_by,
       assigned_to, warehouse_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     RETURNING *`,
     [
       user_id,
       title,
@@ -1233,6 +1234,7 @@ async function createNotification({
       warehouse_id
     ]
   );
+  return result.rows?.[0] || null;
 }
 
 const COMPANY_MODULE_KEYS = [
@@ -6229,9 +6231,10 @@ app.post("/pos/send-receipt-email", authenticateToken, async (req, res) => {
 
 app.post("/push/subscribe", authenticateToken, async (req, res) => {
   try {
-    if (!process.env.WEB_PUSH_VAPID_PUBLIC_KEY || !process.env.WEB_PUSH_VAPID_PRIVATE_KEY) {
+    const pushConfig = getPushConfig();
+    if (!pushConfig.configured) {
       return res.status(503).json({
-        error: "Configuration Web Push manquante. Configurez WEB_PUSH_VAPID_PUBLIC_KEY et WEB_PUSH_VAPID_PRIVATE_KEY."
+        error: "Configuration Web Push manquante. Configurez VAPID_PUBLIC_KEY et VAPID_PRIVATE_KEY."
       });
     }
 
@@ -6274,22 +6277,17 @@ app.post("/push/subscribe", authenticateToken, async (req, res) => {
 
 app.post("/push/test", authenticateToken, async (req, res) => {
   try {
-    if (!process.env.WEB_PUSH_VAPID_PUBLIC_KEY || !process.env.WEB_PUSH_VAPID_PRIVATE_KEY) {
+    const pushConfig = getPushConfig();
+    if (!pushConfig.configured) {
       return res.status(503).json({
-        error: "Configuration Web Push manquante. Configurez WEB_PUSH_VAPID_PUBLIC_KEY et WEB_PUSH_VAPID_PRIVATE_KEY."
-      });
-    }
-
-    if (!webPush) {
-      return res.status(503).json({
-        error: "Module web-push non installé côté backend. Installez web-push avant d’envoyer des notifications réelles."
+        error: "Configuration Web Push manquante. Configurez VAPID_PUBLIC_KEY et VAPID_PRIVATE_KEY."
       });
     }
 
     webPush.setVapidDetails(
-      process.env.WEB_PUSH_CONTACT || `mailto:${process.env.SMTP_FROM || process.env.SMTP_USER || "support@hafiya.trianglewmspro.com"}`,
-      process.env.WEB_PUSH_VAPID_PUBLIC_KEY,
-      process.env.WEB_PUSH_VAPID_PRIVATE_KEY
+      pushConfig.subject,
+      pushConfig.publicKey,
+      pushConfig.privateKey
     );
 
     const result = await pool.query(
@@ -9774,7 +9772,245 @@ async function ensureDefaultLaboratoryAnalyses(companyId) {
   }
 }
 
-async function notifyLaboratoryUsers(companyId, payload) {
+const DEFAULT_HAFIYA_NOTIFICATION_EMAIL = "hafiyamali2025@gmail.com";
+const DEFAULT_HAFIYA_NOTIFICATION_PHONE = "70717119";
+
+function normalizeMaliPhone(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let digits = raw.replace(/[^0-9+]/g, "");
+  if (digits.startsWith("00")) digits = `+${digits.slice(2)}`;
+  if (digits.startsWith("+")) return `+${digits.slice(1).replace(/[^0-9]/g, "")}`;
+  digits = digits.replace(/[^0-9]/g, "");
+  if (digits.length === 8) return `+223${digits}`;
+  if (digits.startsWith("223")) return `+${digits}`;
+  return digits ? `+${digits}` : "";
+}
+
+function getSmtpConfig() {
+  const host = process.env.SMTP_HOST || process.env.MAIL_HOST;
+  const user = process.env.SMTP_USER || process.env.MAIL_USER;
+  const pass = process.env.SMTP_PASS || process.env.MAIL_PASS;
+  const port = Number(process.env.SMTP_PORT || process.env.MAIL_PORT || 587);
+  const from = process.env.SMTP_FROM || process.env.MAIL_FROM || user;
+  return { configured: Boolean(host && user && pass), host, user, pass, port, from };
+}
+
+function getSmsConfig() {
+  return {
+    configured: Boolean(process.env.SMS_PROVIDER && process.env.SMS_API_KEY),
+    provider: process.env.SMS_PROVIDER || null,
+  };
+}
+
+function getPushConfig() {
+  const publicKey = process.env.VAPID_PUBLIC_KEY || process.env.WEB_PUSH_VAPID_PUBLIC_KEY || "";
+  const privateKey = process.env.VAPID_PRIVATE_KEY || process.env.WEB_PUSH_VAPID_PRIVATE_KEY || "";
+  const subject = process.env.VAPID_SUBJECT || process.env.WEB_PUSH_CONTACT || "mailto:hafiyamali2025@gmail.com";
+  return { configured: Boolean(webPush && publicKey && privateKey), publicKey, privateKey, subject };
+}
+
+function laboratoryNotificationChannels() {
+  return {
+    email_configured: getSmtpConfig().configured,
+    sms_provider_configured: getSmsConfig().configured,
+    push_configured: getPushConfig().configured,
+  };
+}
+
+let laboratoryPhase4SchemaReady = false;
+
+async function ensureLaboratoryPhase4Schema() {
+  if (laboratoryPhase4SchemaReady) return;
+  await pool.query(`
+    ALTER TABLE laboratory_settings
+      ADD COLUMN IF NOT EXISTS commercial_name TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS slogan TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS notification_email TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS notification_phone TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS country TEXT DEFAULT 'Mali',
+      ADD COLUMN IF NOT EXISTS district TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS location_hint TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS latitude NUMERIC,
+      ADD COLUMN IF NOT EXISTS longitude NUMERIC,
+      ADD COLUMN IF NOT EXISTS website_url TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS facebook_url TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS instagram_url TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS opening_days TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS opening_time TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS closing_time TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS open_24h BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS appointment_message TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS appointment_instructions TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS practical_information TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS internal_notifications_enabled BOOLEAN DEFAULT true,
+      ADD COLUMN IF NOT EXISTS email_notifications_enabled BOOLEAN DEFAULT true,
+      ADD COLUMN IF NOT EXISTS sms_notifications_enabled BOOLEAN DEFAULT true,
+      ADD COLUMN IF NOT EXISTS push_notifications_enabled BOOLEAN DEFAULT true
+  `);
+  await pool.query(
+    `UPDATE laboratory_settings
+     SET notification_email = COALESCE(NULLIF(notification_email, ''), $1),
+         notification_phone = COALESCE(NULLIF(notification_phone, ''), $2),
+         country = COALESCE(NULLIF(country, ''), 'Mali')`,
+    [DEFAULT_HAFIYA_NOTIFICATION_EMAIL, DEFAULT_HAFIYA_NOTIFICATION_PHONE]
+  );
+  await pool.query(`
+    ALTER TABLE laboratory_appointments
+      ADD COLUMN IF NOT EXISTS patient_phone_normalized TEXT DEFAULT '',
+      ADD COLUMN IF NOT EXISTS decision_by INTEGER,
+      ADD COLUMN IF NOT EXISTS decision_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS notification_status JSONB DEFAULT '{}'::jsonb
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sms_outbox (
+      id SERIAL PRIMARY KEY,
+      phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      provider TEXT,
+      error_message TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      sent_at TIMESTAMP
+    )
+  `);
+  const appointments = await pool.query(
+    `SELECT id, patient_phone
+     FROM laboratory_appointments
+     WHERE COALESCE(patient_phone_normalized, '') = '' AND COALESCE(patient_phone, '') <> ''`
+  );
+  for (const appointment of appointments.rows) {
+    await pool.query(
+      "UPDATE laboratory_appointments SET patient_phone_normalized=$1 WHERE id=$2",
+      [normalizeMaliPhone(appointment.patient_phone), appointment.id]
+    );
+  }
+  laboratoryPhase4SchemaReady = true;
+}
+
+async function getLaboratorySettings(companyId) {
+  await ensureLaboratoryPhase4Schema();
+  const result = await pool.query(
+    "SELECT * FROM laboratory_settings WHERE company_id=$1 ORDER BY id DESC LIMIT 1",
+    [companyId]
+  );
+  const row = result.rows[0] || { company_id: companyId, lab_name: "", is_published: false, public_category: "Santé / Laboratoire" };
+  return {
+    ...row,
+    notification_email: row.notification_email || row.email || DEFAULT_HAFIYA_NOTIFICATION_EMAIL,
+    notification_phone: row.notification_phone || row.whatsapp || row.phone || DEFAULT_HAFIYA_NOTIFICATION_PHONE,
+  };
+}
+
+async function sendHafiyaEmail({ to, subject, text, html }) {
+  const smtp = getSmtpConfig();
+  if (!to) return { channel: "email", configured: smtp.configured, sent: false, reason: "recipient_missing" };
+  if (!smtp.configured) return { channel: "email", configured: false, sent: false, reason: "smtp_not_configured" };
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.port === 465,
+      auth: { user: smtp.user, pass: smtp.pass },
+    });
+    await transporter.sendMail({ from: smtp.from, to, subject, text, html: html || text });
+    return { channel: "email", configured: true, sent: true };
+  } catch (error) {
+    console.warn("Email HAFIYA non envoyé:", error.message);
+    return { channel: "email", configured: true, sent: false, reason: error.message };
+  }
+}
+
+async function queueHafiyaSms({ phone, message }) {
+  const normalizedPhone = normalizeMaliPhone(phone);
+  const sms = getSmsConfig();
+  if (!normalizedPhone) return { channel: "sms", configured: sms.configured, queued: false, reason: "recipient_missing" };
+  const status = sms.configured ? "queued" : "not_configured";
+  try {
+    await pool.query(
+      "INSERT INTO sms_outbox (phone, message, status, created_at) VALUES ($1,$2,$3,CURRENT_TIMESTAMP)",
+      [normalizedPhone, message, status]
+    );
+  } catch (error) {
+    console.warn("SMS HAFIYA non enregistré:", error.message);
+    return { channel: "sms", configured: sms.configured, queued: false, reason: error.message };
+  }
+  return { channel: "sms", configured: sms.configured, queued: true, status };
+}
+
+async function sendPushToUsers({ userIds = [], title, message, url = "/notifications", metadata = {} }) {
+  const push = getPushConfig();
+  const uniqueUserIds = [...new Set((userIds || []).filter(Boolean))];
+  if (!uniqueUserIds.length) return { channel: "push", configured: push.configured, sent: 0, reason: "recipient_missing" };
+  if (!push.configured) return { channel: "push", configured: false, sent: 0, reason: "push_not_configured" };
+  try {
+    webPush.setVapidDetails(push.subject, push.publicKey, push.privateKey);
+    const subscriptions = await pool.query(
+      "SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE is_active = true AND user_id = ANY($1::int[])",
+      [uniqueUserIds]
+    );
+    let sent = 0;
+    for (const sub of subscriptions.rows) {
+      try {
+        await webPush.sendNotification(
+          {
+            endpoint: sub.endpoint,
+            keys: { p256dh: sub.p256dh, auth: sub.auth },
+          },
+          JSON.stringify({ title, body: message, url, metadata })
+        );
+        sent += 1;
+      } catch (error) {
+        console.warn("Push HAFIYA non envoyé:", error.message);
+      }
+    }
+    return { channel: "push", configured: true, sent };
+  } catch (error) {
+    console.warn("Push HAFIYA non envoyé:", error.message);
+    return { channel: "push", configured: true, sent: 0, reason: error.message };
+  }
+}
+
+async function sendAppointmentNotificationBundle({ settings, labUserIds = [], appointment, event, clientUserId = null }) {
+  const statuses = [];
+  const labName = settings.lab_name || settings.commercial_name || "HAFIYA Laboratoire";
+  const patientName = appointment.patient_name || "Client HAFIYA";
+  const appointmentDate = appointment.proposed_date || appointment.appointment_date || appointment.requested_date || appointment.preferred_date || "date à confirmer";
+  const appointmentTime = appointment.proposed_time || appointment.appointment_time || appointment.requested_time || appointment.preferred_time || "heure à confirmer";
+  let title = "Nouveau rendez-vous HAFIYA";
+  let message = `Nouveau rendez-vous demandé par ${patientName} pour le ${appointmentDate} à ${appointmentTime}.`;
+  let recipients = labUserIds;
+  let emailTo = settings.notification_email;
+  let smsTo = settings.notification_phone;
+
+  if (event === "accepted") {
+    title = "Rendez-vous accepté";
+    message = `Votre rendez-vous chez ${labName} est accepté pour le ${appointmentDate} à ${appointmentTime}.`;
+    recipients = clientUserId ? [clientUserId] : [];
+    emailTo = appointment.patient_email;
+    smsTo = appointment.patient_phone_normalized || appointment.patient_phone;
+  } else if (event === "refused") {
+    title = "Rendez-vous refusé";
+    message = `Votre rendez-vous chez ${labName} n'a pas pu être accepté. Merci de choisir un autre créneau.`;
+    recipients = clientUserId ? [clientUserId] : [];
+    emailTo = appointment.patient_email;
+    smsTo = appointment.patient_phone_normalized || appointment.patient_phone;
+  }
+
+  if (settings.email_notifications_enabled !== false) {
+    statuses.push(await sendHafiyaEmail({ to: emailTo, subject: title, text: message }));
+  }
+  if (settings.sms_notifications_enabled !== false) {
+    statuses.push(await queueHafiyaSms({ phone: smsTo, message }));
+  }
+  if (settings.push_notifications_enabled !== false) {
+    statuses.push(await sendPushToUsers({ userIds: recipients, title, message, url: event === "requested" ? "/laboratoire?mode=appointments" : "/client/laboratoire/rendez-vous" }));
+  }
+  return statuses;
+}
+
+async function notifyLaboratoryUsers(companyId, payload, settings = null) {
+  const labSettings = settings || await getLaboratorySettings(companyId);
   const users = await pool.query(
     `SELECT id FROM users
      WHERE company_id=$1
@@ -9783,9 +10019,16 @@ async function notifyLaboratoryUsers(companyId, payload) {
     [companyId, ["super_admin", "admin", "direction", "directrice", "secretaire", "technicien_labo", "responsable_laboratoire", "biologiste"]]
   );
 
-  for (const user of users.rows) {
-    await createNotification({ user_id: user.id, company_id: companyId, ...payload });
+  const userIds = users.rows.map((user) => user.id);
+  if (labSettings.internal_notifications_enabled === false) {
+    return { userIds, notifications: [] };
   }
+  const notifications = [];
+  for (const user of users.rows) {
+    const notification = await createNotification({ user_id: user.id, company_id: companyId, ...payload });
+    if (notification) notifications.push(notification);
+  }
+  return { userIds, notifications };
 }
 
 function buildAppointmentNotificationMessage(appointment) {
@@ -9873,15 +10116,17 @@ app.get("/laboratory/appointments/public-by-phone", async (req, res) => {
   try {
     const phone = String(req.query.phone || "").trim();
     if (!phone) return res.json([]);
+    await ensureLaboratoryPhase4Schema();
+    const normalizedPhone = normalizeMaliPhone(phone);
 
     const result = await pool.query(
       `SELECT la.*, ls.lab_name
        FROM laboratory_appointments la
        LEFT JOIN laboratory_settings ls ON ls.company_id=la.company_id
-       WHERE la.patient_phone=$1
+       WHERE la.patient_phone=$1 OR la.patient_phone_normalized=$2
        ORDER BY la.id DESC
        LIMIT 100`,
-      [phone]
+      [phone, normalizedPhone]
     );
 
     res.json(result.rows);
@@ -9944,59 +10189,60 @@ app.get("/laboratory/settings", authenticateToken, async (req, res) => {
   try {
     if (!canManageLaboratory(req.user)) return res.status(403).json({ error: "Accès laboratoire refusé." });
     const companyId = getEffectiveCompanyId(req);
-    const result = await pool.query("SELECT * FROM laboratory_settings WHERE company_id=$1 ORDER BY id DESC LIMIT 1", [companyId]);
-    res.json(result.rows[0] || { company_id: companyId, lab_name: "", is_published: false, public_category: "Santé / Laboratoire" });
+    await ensureDefaultLaboratoryAnalyses(companyId);
+    const settings = await getLaboratorySettings(companyId);
+    res.json({ ...settings, notification_channels: laboratoryNotificationChannels() });
   } catch (error) {
     console.error("ERREUR LAB SETTINGS :", error);
     res.status(500).json({ error: "Erreur paramètres laboratoire" });
   }
 });
 
+app.get("/push/config", authenticateToken, async (req, res) => {
+  const config = getPushConfig();
+  res.json({ configured: config.configured, public_key: config.configured ? config.publicKey : "" });
+});
+
 app.put("/laboratory/settings", authenticateToken, async (req, res) => {
   try {
     if (!canManageLaboratory(req.user)) return res.status(403).json({ error: "Accès laboratoire refusé." });
     const companyId = getEffectiveCompanyId(req);
-    const {
-      lab_name = "", logo_url = "", phone = "", whatsapp = "", email = "",
-      address = "", city = "", opening_hours = "", description = "",
-      home_sampling_enabled = false, appointments_enabled = true,
-      online_payment_enabled = false, is_published = false,
-      public_image_url = "", public_description = ""
-    } = req.body || {};
+    await ensureDefaultLaboratoryAnalyses(companyId);
+    await ensureLaboratoryPhase4Schema();
+    const allowed = [
+      "lab_name", "commercial_name", "slogan", "logo_url", "phone", "whatsapp", "email", "notification_email", "notification_phone",
+      "address", "city", "country", "district", "location_hint", "latitude", "longitude", "opening_hours", "opening_days", "opening_time", "closing_time", "open_24h",
+      "description", "home_sampling_enabled", "appointments_enabled", "online_payment_enabled", "is_published", "public_image_url", "public_description",
+      "website_url", "facebook_url", "instagram_url", "appointment_message", "appointment_instructions", "practical_information",
+      "internal_notifications_enabled", "email_notifications_enabled", "sms_notifications_enabled", "push_notifications_enabled"
+    ];
+    const values = {};
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) values[key] = req.body[key];
+    }
+    if (values.notification_phone) values.notification_phone = normalizeMaliPhone(values.notification_phone);
+    if (!values.notification_email && req.body?.email) values.notification_email = req.body.email;
+    if (!values.notification_phone && req.body?.whatsapp) values.notification_phone = normalizeMaliPhone(req.body.whatsapp);
+    if (values.latitude === "") values.latitude = null;
+    if (values.longitude === "") values.longitude = null;
+    values.public_category = "Santé / Laboratoire";
+    values.updated_at = new Date();
+
+    const keys = Object.keys(values);
+    const columns = keys.map((key, index) => `${key}=$${index + 2}`).join(", ");
     let result = await pool.query(
-      `UPDATE laboratory_settings
-       SET lab_name=$2, logo_url=$3, phone=$4, whatsapp=$5, email=$6,
-           address=$7, city=$8, opening_hours=$9, description=$10,
-           home_sampling_enabled=$11, appointments_enabled=$12,
-           online_payment_enabled=$13, is_published=$14,
-           public_category='Santé / Laboratoire',
-           public_image_url=$15, public_description=$16,
-           updated_at=CURRENT_TIMESTAMP
-       WHERE company_id=$1
-       RETURNING *`,
-      [
-        companyId, lab_name, logo_url, phone, whatsapp, email, address, city,
-        opening_hours, description, home_sampling_enabled, appointments_enabled,
-        online_payment_enabled, is_published, public_image_url, public_description
-      ]
+      `UPDATE laboratory_settings SET ${columns} WHERE company_id=$1 RETURNING *`,
+      [companyId, ...keys.map((key) => values[key])]
     );
     if (!result.rows[0]) {
+      const insertKeys = ["company_id", ...keys];
+      const placeholders = insertKeys.map((_, index) => `$${index + 1}`).join(", ");
       result = await pool.query(
-        `INSERT INTO laboratory_settings
-         (company_id, lab_name, logo_url, phone, whatsapp, email, address, city,
-          opening_hours, description, home_sampling_enabled, appointments_enabled,
-          online_payment_enabled, is_published, public_category, public_image_url,
-          public_description)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'Santé / Laboratoire',$15,$16)
-         RETURNING *`,
-        [
-          companyId, lab_name, logo_url, phone, whatsapp, email, address, city,
-          opening_hours, description, home_sampling_enabled, appointments_enabled,
-          online_payment_enabled, is_published, public_image_url, public_description
-        ]
+        `INSERT INTO laboratory_settings (${insertKeys.join(", ")}) VALUES (${placeholders}) RETURNING *`,
+        [companyId, ...keys.map((key) => values[key])]
       );
     }
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], notification_channels: laboratoryNotificationChannels() });
   } catch (error) {
     console.error("ERREUR UPDATE LAB SETTINGS :", error);
     res.status(500).json({ error: error.detail || error.message || "Erreur sauvegarde laboratoire" });
@@ -10228,12 +10474,17 @@ app.post("/laboratory/appointments", async (req, res) => {
     if (!labExists.rows[0]) {
       return res.status(404).json({ error: "Laboratoire public introuvable." });
     }
+    await ensureLaboratoryPhase4Schema();
     const {
       patient_name = req.user?.fullname || "", patient_phone = req.user?.phone || "",
       patient_email = req.user?.email || "", analysis_id = null, analysis_name = "",
       requested_date = null, requested_time = "", home_sampling = false,
       home_address = "", message = "", service_type = "sur_place"
     } = req.body || {};
+    if (!String(patient_name || "").trim() || !String(patient_phone || "").trim()) {
+      return res.status(400).json({ error: "Nom et téléphone obligatoires." });
+    }
+    const normalizedPhone = normalizeMaliPhone(patient_phone);
     const rawAnalysisIds = Array.isArray(req.body?.analysis_ids)
       ? req.body.analysis_ids
       : analysis_id
@@ -10263,18 +10514,19 @@ app.post("/laboratory/appointments", async (req, res) => {
     const totalAmount = selectedAnalyses.rows.reduce((sum, analysis) => sum + Number(analysis.price || 0), 0);
     const result = await pool.query(
       `INSERT INTO laboratory_appointments
-       (company_id, client_user_id, patient_name, patient_phone, patient_email,
+       (company_id, client_user_id, patient_name, patient_phone, patient_phone_normalized, patient_email,
         analysis_id, analysis_name, requested_date, requested_time,
         home_sampling, home_address, message, status, analysis_ids,
         total_amount, service_type)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'En attente',$13,$14,$15)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'En attente',$14,$15,$16)
        RETURNING *`,
       [
         companyId,
         req.user?.id || null,
-        patient_name,
-        patient_phone,
-        patient_email,
+        String(patient_name).trim(),
+        String(patient_phone).trim(),
+        normalizedPhone,
+        patient_email ? String(patient_email).trim() : null,
         analysisIds[0],
         analysis_name || selectedNames,
         requested_date || null,
@@ -10288,7 +10540,8 @@ app.post("/laboratory/appointments", async (req, res) => {
       ]
     );
     const appointment = result.rows[0];
-    await notifyLaboratoryUsers(companyId, {
+    const settings = await getLaboratorySettings(companyId);
+    const internal = await notifyLaboratoryUsers(companyId, {
       title: "Nouveau rendez-vous HAFIYA",
       message: `Nouvelle demande de ${patient_name || "patient"} pour ${appointment.analysis_name || selectedNames}.`,
       type: "laboratory_appointment",
@@ -10297,7 +10550,13 @@ app.post("/laboratory/appointments", async (req, res) => {
       related_entity_id: appointment.id,
       action_url: "/laboratoire/rendez-vous"
     }).catch((error) => console.error("ERREUR NOTIF RDV LAB :", error));
-    res.status(201).json({ ...appointment, notification_ready: true });
+    const notificationChannels = await sendAppointmentNotificationBundle({
+      settings,
+      labUserIds: internal?.userIds || [],
+      appointment,
+      event: "requested",
+    });
+    res.status(201).json({ ...appointment, notification_ready: true, notification_channels: notificationChannels });
   } catch (error) {
     console.error("ERREUR CREATE LAB APPOINTMENT :", error);
     res.status(500).json({ error: "Erreur demande rendez-vous laboratoire" });
@@ -10337,23 +10596,43 @@ app.put("/laboratory/appointments/:id/status", authenticateToken, async (req, re
     const normalizedStatus =
       normalizedStatusMap[String(status || "").toLowerCase()] || String(status || "Confirmé");
     const responseMessage = laboratory_message || lab_response || message || "";
+    await ensureLaboratoryPhase4Schema();
+    const currentResult = await pool.query(
+      "SELECT * FROM laboratory_appointments WHERE id=$1 AND company_id=$2 LIMIT 1",
+      [req.params.id, companyId]
+    );
+    if (!currentResult.rows[0]) return res.status(404).json({ error: "Rendez-vous introuvable." });
+    const currentAppointment = currentResult.rows[0];
+    const currentStatus =
+      normalizedStatusMap[String(currentAppointment.status || "").toLowerCase()] || String(currentAppointment.status || "");
+    const statusChanged = currentStatus !== normalizedStatus;
     const result = await pool.query(
       `UPDATE laboratory_appointments
        SET status=$1, proposed_date=$2, proposed_time=$3, lab_response=$4,
+           decision_by=$5,
+           decision_at=CASE WHEN $6::boolean THEN CURRENT_TIMESTAMP ELSE decision_at END,
            updated_at=CURRENT_TIMESTAMP
-       WHERE id=$5 AND company_id=$6
+       WHERE id=$7 AND company_id=$8
        RETURNING *`,
-      [normalizedStatus, proposed_date || null, proposed_time, responseMessage, req.params.id, companyId]
+      [
+        normalizedStatus,
+        proposed_date || currentAppointment.proposed_date || null,
+        proposed_time || currentAppointment.proposed_time || "",
+        responseMessage || currentAppointment.lab_response || "",
+        req.user.id,
+        statusChanged,
+        req.params.id,
+        companyId
+      ]
     );
-    if (!result.rows[0]) return res.status(404).json({ error: "Rendez-vous introuvable." });
     const updatedAppointment = result.rows[0];
 
-    if (isAcceptedLabStatus(updatedAppointment?.status)) {
+    if (statusChanged && isAcceptedLabStatus(updatedAppointment?.status)) {
       await createPatientFromAcceptedAppointment(updatedAppointment.id);
     }
 
     const readyMessage = buildAppointmentNotificationMessage(updatedAppointment);
-    if (updatedAppointment.client_user_id) {
+    if (statusChanged && updatedAppointment.client_user_id) {
       await createNotification({
         user_id: updatedAppointment.client_user_id,
         company_id: updatedAppointment.company_id,
@@ -10365,8 +10644,32 @@ app.put("/laboratory/appointments/:id/status", authenticateToken, async (req, re
         action_url: "/client/laboratoire/rendez-vous"
       }).catch((error) => console.error("ERREUR NOTIF CLIENT RDV :", error));
     }
+    const shouldNotifyDecision = statusChanged && (
+      isAcceptedLabStatus(updatedAppointment.status) ||
+      String(updatedAppointment.status || "").toLowerCase().includes("refus")
+    );
+    const settings = shouldNotifyDecision ? await getLaboratorySettings(companyId) : null;
+    const notificationChannels = shouldNotifyDecision
+      ? await sendAppointmentNotificationBundle({
+          settings,
+          labUserIds: [],
+          appointment: updatedAppointment,
+          event: isAcceptedLabStatus(updatedAppointment.status)
+            ? "accepted"
+            : String(updatedAppointment.status || "").toLowerCase().includes("refus")
+              ? "refused"
+              : "updated",
+          clientUserId: updatedAppointment.client_user_id
+        })
+      : [];
 
-    res.json({ ...updatedAppointment, notification_ready: true, notification_message: readyMessage });
+    res.json({
+      ...updatedAppointment,
+      notification_ready: true,
+      notification_message: readyMessage,
+      notification_channels: notificationChannels,
+      status_changed: statusChanged
+    });
   } catch (error) {
     console.error("ERREUR UPDATE LAB APPOINTMENT :", error);
     res.status(500).json({ error: "Erreur statut rendez-vous" });
@@ -10625,15 +10928,17 @@ app.get("/client/laboratory/appointments/public", async (req, res) => {
   try {
     const phone = String(req.query.phone || "").trim();
     if (!phone) return res.json([]);
+    await ensureLaboratoryPhase4Schema();
+    const normalizedPhone = normalizeMaliPhone(phone);
 
     const result = await pool.query(
       `SELECT la.*, ls.lab_name
        FROM laboratory_appointments la
        LEFT JOIN laboratory_settings ls ON ls.company_id=la.company_id
-       WHERE la.patient_phone=$1
+       WHERE la.patient_phone=$1 OR la.patient_phone_normalized=$2
        ORDER BY la.id DESC
        LIMIT 100`,
-      [phone]
+      [phone, normalizedPhone]
     );
 
     res.json(result.rows);
