@@ -1014,7 +1014,7 @@ async function logAudit(req, action, entityType = "", entityId = null, details =
 }
 
 function generateOtpCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 function hashVerificationSecret(value) {
@@ -1067,7 +1067,12 @@ async function createVerificationCode({ companyId, userId, targetType, targetVal
 
 async function sendVerificationMessage({ targetType, targetValue, code, verifyUrl }) {
   if (targetType === "email") {
-    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    const smtpHost = process.env.SMTP_HOST || process.env.MAIL_HOST;
+    const smtpUser = process.env.SMTP_USER || process.env.MAIL_USER;
+    const smtpPass = process.env.SMTP_PASS || process.env.MAIL_PASS;
+    const smtpPort = Number(process.env.SMTP_PORT || process.env.MAIL_PORT || 587);
+    const smtpFrom = process.env.SMTP_FROM || process.env.MAIL_FROM || smtpUser;
+    if (!smtpHost || !smtpUser || !smtpPass) {
       return {
         sent: false,
         provider: "smtp",
@@ -1076,24 +1081,24 @@ async function sendVerificationMessage({ targetType, targetValue, code, verifyUr
     }
 
     const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: Number(process.env.SMTP_PORT || 587) === 465,
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+        user: smtpUser,
+        pass: smtpPass
       }
     });
 
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: smtpFrom,
       to: targetValue,
-      subject: "Code de vérification HAFIYA Laboratoire",
-      text: `Votre code de vérification HAFIYA Laboratoire est : ${code}. Il expire dans 10 minutes.\n\nLien sécurisé : ${verifyUrl}`,
+      subject: "Vérifiez votre compte HAFIYA",
+      text: `Bienvenue sur HAFIYA. Utilisez ce code pour confirmer votre compte : ${code}. Ce code expire dans 10 minutes.\n\nLien sécurisé : ${verifyUrl}`,
       html: `
         <div style="font-family:Arial,sans-serif;color:#111">
-          <h2>Vérification HAFIYA Laboratoire</h2>
-          <p>Votre code de vérification est :</p>
+          <h2>Vérifiez votre compte HAFIYA</h2>
+          <p>Bienvenue sur HAFIYA. Utilisez ce code pour confirmer votre compte :</p>
           <p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p>
           <p>Ce code expire dans 10 minutes.</p>
           <p><a href="${escapeHtml(verifyUrl)}">Valider directement mon compte</a></p>
@@ -1104,16 +1109,38 @@ async function sendVerificationMessage({ targetType, targetValue, code, verifyUr
     return { sent: true, provider: process.env.EMAIL_PROVIDER || "smtp", message: "Code OTP envoyé par email." };
   }
 
-  if ((process.env.SMS_PROVIDER || "sandbox") === "sandbox" || !process.env.SMS_API_KEY) {
+  const smsProvider = process.env.SMS_PROVIDER || "";
+  const smsConfigured = Boolean(smsProvider && smsProvider !== "sandbox" && process.env.SMS_API_KEY);
+  if (!smsConfigured) {
     return {
       sent: false,
-      provider: process.env.SMS_PROVIDER || "sms",
+      provider: smsProvider || "sms",
       message: "Provider SMS non configuré. Configurez Twilio, Africa's Talking, Orange API ou MTN API."
     };
   }
 
-  console.log("SMS OTP prêt à envoyer :", { targetValue });
-  return { sent: false, provider: process.env.SMS_PROVIDER, message: "Provider SMS préparé." };
+  const smsText = `HAFIYA : votre code de vérification est ${code}. Ce code expire dans 10 minutes.`;
+  await pool.query(
+    "INSERT INTO sms_outbox (phone, message, status, created_at) VALUES ($1,$2,'queued',CURRENT_TIMESTAMP)",
+    [normalizeMaliPhone(targetValue) || targetValue, smsText]
+  );
+  return {
+    sent: false,
+    queued: true,
+    provider: smsProvider,
+    message: "Code OTP enregistré dans la file SMS."
+  };
+}
+
+function isVerificationChannelConfigured(targetType) {
+  if (targetType === "email") {
+    return Boolean((process.env.SMTP_HOST || process.env.MAIL_HOST) && (process.env.SMTP_USER || process.env.MAIL_USER) && (process.env.SMTP_PASS || process.env.MAIL_PASS));
+  }
+  return Boolean(process.env.SMS_PROVIDER && process.env.SMS_PROVIDER !== "sandbox" && process.env.SMS_API_KEY);
+}
+
+function verificationDeliveryAccepted(delivery) {
+  return delivery?.sent === true || delivery?.queued === true;
 }
 
 async function sendPasswordResetMessage({ targetType, targetValue, code, resetUrl }) {
@@ -2706,7 +2733,7 @@ app.post("/verification/verify", async (req, res) => {
     const verification = result.rows[0];
 
     if (!verification) {
-      return res.status(400).json({ error: "Code expiré ou introuvable." });
+      return res.status(400).json({ error: "Ce code a expiré. Demandez un nouveau code." });
     }
 
     if (Number(verification.attempts || 0) >= 5) {
@@ -2790,6 +2817,32 @@ app.post("/verification/resend", async (req, res) => {
     if (!user) return res.status(404).json({ error: "Utilisateur introuvable." });
 
     const finalTargetValue = targetType === "phone" ? user.phone : user.email;
+    if (!finalTargetValue) {
+      return res.status(400).json({ error: targetType === "phone" ? "Aucun téléphone sur ce compte." : "Aucun email sur ce compte." });
+    }
+    if (!isVerificationChannelConfigured(targetType)) {
+      return res.status(503).json({
+        error: "Ce mode de vérification est temporairement indisponible.",
+        code: targetType === "email" ? "smtp_not_configured" : "sms_not_configured",
+        missing: targetType === "email"
+          ? ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"]
+          : ["SMS_PROVIDER", "SMS_API_KEY"]
+      });
+    }
+    const recent = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 minute')::int AS last_minute,
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour')::int AS last_hour
+       FROM verification_codes
+       WHERE user_id=$1 AND target_type=$2 AND LOWER(target_value)=LOWER($3)`,
+      [user.id, targetType, finalTargetValue]
+    );
+    if (Number(recent.rows[0]?.last_minute || 0) > 0) {
+      return res.status(429).json({ error: "Attendez avant de renvoyer un code." });
+    }
+    if (Number(recent.rows[0]?.last_hour || 0) >= 5) {
+      return res.status(429).json({ error: "Trop de codes demandés. Réessayez plus tard." });
+    }
     const verification = await createVerificationCode({
       companyId: user.company_id,
       userId: user.id,
@@ -2802,10 +2855,16 @@ app.post("/verification/resend", async (req, res) => {
       code: verification.code,
       verifyUrl: verification.verify_url
     });
+    if (!verificationDeliveryAccepted(delivery)) {
+      return res.status(503).json({
+        error: "Ce mode de vérification est temporairement indisponible.",
+        delivery
+      });
+    }
 
     res.json({
       success: true,
-      message: "Nouveau code généré.",
+      message: "Nouveau code envoyé.",
       target_type: targetType,
       target_value: finalTargetValue,
       delivery
@@ -9590,13 +9649,46 @@ app.get("/marketplace/business", authenticateToken, async (req, res) => {
 
 app.post("/marketplace/customers/register", async (req, res) => {
   try {
-    const { fullname, email, phone, password, country = "", city = "", address = "" } = req.body || {};
+    const { fullname, email, phone, password, country = "", city = "", address = "", verification_method = "" } = req.body || {};
     const cleanEmail = String(email || "").trim().toLowerCase();
-    const cleanPhone = String(phone || "").trim();
+    const cleanPhone = normalizeMaliPhone(phone) || String(phone || "").trim();
     if (!fullname || (!cleanEmail && !cleanPhone) || !password) {
       return res.status(400).json({ error: "Nom, contact et mot de passe obligatoires." });
     }
-    const storedEmail = cleanEmail || `customer-${Date.now()}-${Math.floor(Math.random() * 100000)}@pending.trianglewmspro.local`;
+    let targetType = verification_method === "email" ? "email" : verification_method === "phone" ? "phone" : "";
+    if (!targetType) {
+      if (cleanEmail && !cleanPhone) targetType = "email";
+      else if (cleanPhone && !cleanEmail) targetType = "phone";
+      else targetType = cleanEmail && isVerificationChannelConfigured("email") ? "email" : "phone";
+    }
+    if (targetType === "email" && !cleanEmail) {
+      return res.status(400).json({ error: "Email obligatoire pour vérifier par email." });
+    }
+    if (targetType === "phone" && !cleanPhone) {
+      return res.status(400).json({ error: "Téléphone obligatoire pour vérifier par SMS." });
+    }
+    if (!isVerificationChannelConfigured(targetType)) {
+      return res.status(503).json({
+        error: "Ce mode de vérification est temporairement indisponible.",
+        code: targetType === "email" ? "smtp_not_configured" : "sms_not_configured",
+        missing: targetType === "email"
+          ? ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"]
+          : ["SMS_PROVIDER", "SMS_API_KEY"]
+      });
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM users
+       WHERE ($1 <> '' AND LOWER(email)=LOWER($1))
+          OR ($2 <> '' AND regexp_replace(COALESCE(phone,''), '[^0-9+]', '', 'g') = regexp_replace($2, '[^0-9+]', '', 'g'))
+       LIMIT 1`,
+      [cleanEmail, cleanPhone]
+    );
+    if (existing.rows[0]) {
+      return res.status(409).json({ error: "Un compte existe déjà avec ce contact." });
+    }
+
+    const storedEmail = cleanEmail || `customer-${Date.now()}-${crypto.randomBytes(4).toString("hex")}@pending.hafiya.local`;
 
     const passwordHash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
     const userResult = await pool.query(
@@ -9616,8 +9708,7 @@ app.post("/marketplace/customers/register", async (req, res) => {
       [user.id, fullname, cleanEmail, cleanPhone, country, city, address]
     );
 
-    const targetType = cleanEmail ? "email" : "phone";
-    const targetValue = cleanEmail || cleanPhone;
+    const targetValue = targetType === "email" ? cleanEmail : cleanPhone;
     const verification = await createVerificationCode({
       companyId: null,
       userId: user.id,
@@ -9630,6 +9721,12 @@ app.post("/marketplace/customers/register", async (req, res) => {
       code: verification.code,
       verifyUrl: verification.verify_url
     });
+    if (!verificationDeliveryAccepted(delivery)) {
+      return res.status(503).json({
+        error: "Ce mode de vérification est temporairement indisponible.",
+        delivery
+      });
+    }
 
     res.status(201).json({
       success: true,
