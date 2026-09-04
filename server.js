@@ -416,7 +416,8 @@ function canValidateStockMovement(user) {
 
 function isReadOnlyRole(user) {
   const role = normalizeRole(user?.role);
-  return role === "direction" || role === "client";
+  // La Direction HAFIYA est un rôle métier de gestion, pas un rôle lecture seule.
+  return role === "client";
 }
 
 function canViewAllSalaries(user) {
@@ -442,6 +443,8 @@ function canUsePos(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
+    role === "direction" ||
+    role === "directeur" ||
     role === "caissier" ||
     role === "vendeur"
   );
@@ -449,7 +452,13 @@ function canUsePos(user) {
 
 function canManageCaisses(user) {
   const role = normalizeRole(user?.role);
-  return user?.is_super_admin === true || role === "super_admin" || role === "admin";
+  return (
+    user?.is_super_admin === true ||
+    role === "super_admin" ||
+    role === "admin" ||
+    role === "direction" ||
+    role === "directeur"
+  );
 }
 
 function canViewAccounting(user) {
@@ -470,6 +479,8 @@ function canManageAccounting(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
+    role === "direction" ||
+    role === "directeur" ||
     role === "comptable"
   );
 }
@@ -487,7 +498,13 @@ function canApproveAccounting(user) {
 
 function canAdjustPosPrice(user) {
   const role = normalizeRole(user?.role);
-  return user?.is_super_admin === true || role === "super_admin" || role === "admin";
+  return (
+    user?.is_super_admin === true ||
+    role === "super_admin" ||
+    role === "admin" ||
+    role === "direction" ||
+    role === "directeur"
+  );
 }
 
 function getEffectivePosPrice(product) {
