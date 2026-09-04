@@ -22,13 +22,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
       - name: Apply tenant-scoped permission patch
         run: node scripts/apply-hafiya-final-scope.js
       - name: Syntax check backend
         run: node --check server.js
-      - name: Install dependencies
-        run: npm ci
       - name: Diff check
         run: git diff --check
       - name: Commit generated patch
