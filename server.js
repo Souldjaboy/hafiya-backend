@@ -402,14 +402,19 @@ function canAccessDirectionModule(user) {
   );
 }
 
+function isHafiyaDirection(user) {
+  const role = normalizeRole(user?.role);
+  const tenantId = normalizeTenantId(user?.tenant_id);
+  return tenantId === "hafiya" && (role === "direction" || role === "directeur");
+}
+
 function canManageBusinessUsers(user) {
   const role = normalizeRole(user?.role);
   return (
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
-    role === "direction" ||
-    role === "directeur"
+    isHafiyaDirection(user)
   );
 }
 
@@ -440,8 +445,9 @@ function canValidateStockMovement(user) {
 
 function isReadOnlyRole(user) {
   const role = normalizeRole(user?.role);
-  // La Direction HAFIYA est un rôle métier de gestion, pas un rôle lecture seule.
-  return role === "client";
+  if (role === "client") return true;
+  if (role === "direction" || role === "directeur") return !isHafiyaDirection(user);
+  return false;
 }
 
 function canViewAllSalaries(user) {
@@ -467,8 +473,7 @@ function canUsePos(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
-    role === "direction" ||
-    role === "directeur" ||
+    isHafiyaDirection(user) ||
     role === "caissier" ||
     role === "vendeur"
   );
@@ -480,8 +485,7 @@ function canManageCaisses(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
-    role === "direction" ||
-    role === "directeur"
+    isHafiyaDirection(user)
   );
 }
 
@@ -503,8 +507,7 @@ function canManageAccounting(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
-    role === "direction" ||
-    role === "directeur" ||
+    isHafiyaDirection(user) ||
     role === "comptable"
   );
 }
@@ -526,8 +529,7 @@ function canAdjustPosPrice(user) {
     user?.is_super_admin === true ||
     role === "super_admin" ||
     role === "admin" ||
-    role === "direction" ||
-    role === "directeur"
+    isHafiyaDirection(user)
   );
 }
 
