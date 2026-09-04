@@ -3013,8 +3013,8 @@ app.get("/users", authenticateToken, async (req, res) => {
 
 app.get("/modules", authenticateToken, async (req, res) => {
   try {
-    if (!canAccessAdminSettings(req.user)) {
-      return res.status(403).json({ error: "Accès refusé : réservé à l’administrateur" });
+    if (!canManageBusinessUsers(req.user)) {
+      return res.status(403).json({ error: "Accès lecture modules refusé." });
     }
 
     const result = await pool.query(
@@ -3241,7 +3241,7 @@ app.post(
 
       const user = userResult.rows[0];
 
-      const badgeCode = `TRIANGLE-EMP-${user.id}`;
+      const badgeCode = `HAFIYA-EMP-${user.id}`;
 
       const updatedUser = await pool.query(
         `
@@ -3376,7 +3376,7 @@ app.post(
         return res.status(403).json({ error: "Le compte Super Admin est protégé." });
       }
 
-      const tempPassword = `Triangle-${crypto.randomBytes(4).toString("hex")}-2026`;
+      const tempPassword = `HAFIYA-${crypto.randomBytes(4).toString("hex")}-2026`;
       const hashedPassword = await hashPassword(tempPassword);
       const companyId = getEffectiveCompanyId(req, req.user.company_id);
       const isSuperAdmin = isSuperAdminUser(req.user);
