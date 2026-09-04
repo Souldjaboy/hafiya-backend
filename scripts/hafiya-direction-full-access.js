@@ -78,3 +78,4 @@ replaceOnce(
 
 fs.writeFileSync(path, s);
 console.log('HAFIYA Direction backend full business access patch applied.');
+// Trigger workflow after workflow installation.
