@@ -402,6 +402,30 @@ function canAccessDirectionModule(user) {
   );
 }
 
+function canManageBusinessUsers(user) {
+  const role = normalizeRole(user?.role);
+  return (
+    user?.is_super_admin === true ||
+    role === "super_admin" ||
+    role === "admin" ||
+    role === "direction" ||
+    role === "directeur"
+  );
+}
+
+function isProtectedSystemPermission(moduleKey) {
+  return ["super_admin", "system", "developer", "secrets", "integrations"].includes(
+    String(moduleKey || "").trim().toLowerCase()
+  );
+}
+
+function authorizeBusinessUserManagement(req, res, next) {
+  if (!canManageBusinessUsers(req.user)) {
+    return res.status(403).json({ error: "Accès gestion utilisateurs refusé." });
+  }
+  next();
+}
+
 function canValidateStockMovement(user) {
   const role = normalizeRole(user?.role);
   return (
@@ -3009,11 +3033,11 @@ app.get("/modules", authenticateToken, async (req, res) => {
 
 app.get("/users/:id/permissions", authenticateToken, async (req, res) => {
   try {
-    if (!canAccessAdminSettings(req.user)) {
-      return res.status(403).json({ error: "Accès refusé : réservé à l’administrateur" });
+    if (!canManageBusinessUsers(req.user)) {
+      return res.status(403).json({ error: "Accès gestion permissions refusé." });
     }
 
-    const userResult = await pool.query("SELECT id, company_id FROM users WHERE id=$1", [req.params.id]);
+    const userResult = await pool.query("SELECT id, company_id, role, is_super_admin FROM users WHERE id=$1", [req.params.id]);
     const targetUser = userResult.rows[0];
 
     if (!targetUser) {
@@ -3022,6 +3046,9 @@ app.get("/users/:id/permissions", authenticateToken, async (req, res) => {
 
     if (req.user.is_super_admin !== true && Number(targetUser.company_id) !== Number(req.user.company_id)) {
       return res.status(403).json({ error: "Accès refusé : utilisateur hors entreprise" });
+    }
+    if (!isSuperAdminUser(req.user) && isSuperAdminUser(targetUser)) {
+      return res.status(403).json({ error: "Le compte Super Admin est protégé." });
     }
 
     const result = await pool.query(
@@ -3042,12 +3069,12 @@ app.get("/users/:id/permissions", authenticateToken, async (req, res) => {
 
 app.put("/users/:id/permissions", authenticateToken, async (req, res) => {
   try {
-    if (!canAccessAdminSettings(req.user)) {
-      return res.status(403).json({ error: "Accès refusé : réservé à l’administrateur" });
+    if (!canManageBusinessUsers(req.user)) {
+      return res.status(403).json({ error: "Accès gestion permissions refusé." });
     }
 
     const { permissions = [] } = req.body;
-    const userResult = await pool.query("SELECT id, company_id FROM users WHERE id=$1", [req.params.id]);
+    const userResult = await pool.query("SELECT id, company_id, role, is_super_admin FROM users WHERE id=$1", [req.params.id]);
     const targetUser = userResult.rows[0];
 
     if (!targetUser) {
@@ -3057,10 +3084,19 @@ app.put("/users/:id/permissions", authenticateToken, async (req, res) => {
     if (req.user.is_super_admin !== true && Number(targetUser.company_id) !== Number(req.user.company_id)) {
       return res.status(403).json({ error: "Accès refusé : utilisateur hors entreprise" });
     }
+    if (!isSuperAdminUser(req.user) && isSuperAdminUser(targetUser)) {
+      return res.status(403).json({ error: "Le compte Super Admin est protégé." });
+    }
+    if (!isSuperAdminUser(req.user) && Number(req.user.id) === Number(targetUser.id)) {
+      return res.status(403).json({ error: "La Direction ne peut pas augmenter ses propres permissions système." });
+    }
 
     const saved = [];
 
     for (const permission of permissions) {
+      if (!isSuperAdminUser(req.user) && isProtectedSystemPermission(permission.module_key)) {
+        return res.status(403).json({ error: "Permission système protégée." });
+      }
       const result = await pool.query(
         `INSERT INTO user_permissions
          (user_id, module_key, can_view, can_create, can_edit, can_delete, can_validate, updated_by)
@@ -3153,7 +3189,7 @@ app.put("/users/:id/caisse", authenticateToken, async (req, res) => {
 app.post(
   "/users",
   authenticateToken,
-  authorizeRoles("admin", "super_admin"),
+  authorizeBusinessUserManagement,
   async (req, res) => {
     try {
       const { fullname, email, password, role, phone, company_id } = req.body;
@@ -3249,7 +3285,7 @@ app.post(
 app.put(
   "/users/:id",
   authenticateToken,
-  authorizeRoles("admin", "super_admin"),
+  authorizeBusinessUserManagement,
   async (req, res) => {
     try {
       const companyId = req.user.company_id;
@@ -3257,6 +3293,11 @@ app.put(
       const { id } = req.params;
       const { fullname, email, password, role, phone, is_active } = req.body;
       const requestedRole = normalizeRole(role || "magasinier");
+      const targetBeforeUpdate = await pool.query("SELECT id, role, is_super_admin, company_id FROM users WHERE id=$1", [id]);
+      const protectedTarget = targetBeforeUpdate.rows[0];
+      if (protectedTarget && !isSuperAdmin && isSuperAdminUser(protectedTarget)) {
+        return res.status(403).json({ error: "Le compte Super Admin est protégé." });
+      }
 
       if (requestedRole === "super_admin" && !isSuperAdmin) {
         return res.status(403).json({
@@ -3325,11 +3366,14 @@ app.put(
 app.post(
   "/users/:id/reset-password",
   authenticateToken,
-  authorizeRoles("admin", "super_admin"),
+  authorizeBusinessUserManagement,
   async (req, res) => {
     try {
-      if (!canAccessAdminSettings(req.user)) {
-        return res.status(403).json({ error: "Accès administrateur requis." });
+      const targetResult = await pool.query("SELECT id, role, is_super_admin, company_id FROM users WHERE id=$1", [req.params.id]);
+      const targetUser = targetResult.rows[0];
+      if (!targetUser) return res.status(404).json({ error: "Utilisateur introuvable" });
+      if (!isSuperAdminUser(req.user) && isSuperAdminUser(targetUser)) {
+        return res.status(403).json({ error: "Le compte Super Admin est protégé." });
       }
 
       const tempPassword = `Triangle-${crypto.randomBytes(4).toString("hex")}-2026`;
@@ -3410,7 +3454,7 @@ app.post(
 app.delete(
   "/users/:id",
   authenticateToken,
-  authorizeRoles("admin", "super_admin"),
+  authorizeBusinessUserManagement,
   async (req, res) => {
     try {
       const companyId = req.user.company_id;
@@ -3421,6 +3465,11 @@ app.delete(
         return res.status(400).json({
           error: "Vous ne pouvez pas supprimer votre propre compte."
         });
+      }
+      const targetBeforeDelete = await pool.query("SELECT id, role, is_super_admin, company_id FROM users WHERE id=$1", [id]);
+      const protectedTarget = targetBeforeDelete.rows[0];
+      if (protectedTarget && !isSuperAdminUser(req.user) && isSuperAdminUser(protectedTarget)) {
+        return res.status(403).json({ error: "Le compte Super Admin est protégé." });
       }
 
       const values = [id];
