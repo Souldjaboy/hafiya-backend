@@ -157,7 +157,7 @@ module.exports = function(app, pool, authenticateToken) {
 
   // Version renforcée du parcours public des résultats HAFIYA.
   // Le téléphone est normalisé et le chemin physique du fichier n'est jamais exposé au client.
-  app.post("/laboratory/public/results/verify-v2", async (req, res) => {
+  app.post("/laboratory/public/results/verify", async (req, res) => {
     try {
       const resultCode = String(req.body?.result_code || "").trim();
       const verifier = String(req.body?.verifier || "").trim();

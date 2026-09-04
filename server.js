@@ -3019,12 +3019,25 @@ app.get("/modules", authenticateToken, async (req, res) => {
       return res.status(403).json({ error: "Accès lecture modules refusé." });
     }
 
-    const result = await pool.query(
-      `SELECT module_key, module_name, description, is_active
-       FROM modules
-       WHERE is_active=true
-       ORDER BY module_name ASC`
-    );
+    const hafiyaOnlyModules = [
+      "laboratoire", "analyses", "patients", "rendez_vous", "resultats", "paiements",
+      "badges", "communication", "notifications", "comptabilite", "caisses", "tresorerie",
+      "banques", "salaires"
+    ];
+    const result = req.tenant_id === "hafiya"
+      ? await pool.query(
+          `SELECT module_key, module_name, description, is_active
+           FROM modules
+           WHERE is_active=true
+           ORDER BY module_name ASC`
+        )
+      : await pool.query(
+          `SELECT module_key, module_name, description, is_active
+           FROM modules
+           WHERE is_active=true AND NOT (module_key = ANY($1::text[]))
+           ORDER BY module_name ASC`,
+          [hafiyaOnlyModules]
+        );
 
     res.json(result.rows);
   } catch (error) {
@@ -8828,7 +8841,7 @@ app.post("/reports/email", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "Email destinataire invalide." });
     }
     if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      return res.status(503).json({ error: "SMTP non configuré. Configurez SMTP dans .env." });
+      return res.status(503).json({ error: "L’envoi par email n’est pas disponible pour le moment." });
     }
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -10956,7 +10969,7 @@ app.post("/laboratory/cases/:id/email-result", authenticateToken, async (req, re
       return res.status(400).json({ error: "Email destinataire invalide." });
     }
     if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      return res.status(503).json({ error: "SMTP non configuré. Configurez SMTP dans .env." });
+      return res.status(503).json({ error: "L’envoi par email n’est pas disponible pour le moment." });
     }
     const companyId = getEffectiveCompanyId(req);
     const result = await pool.query(
@@ -11184,48 +11197,7 @@ app.get("/laboratories/public/:id", async (req, res) => {
   }
 });
 
-app.post("/laboratory/public/results/verify", async (req, res) => {
-  try {
-    const { result_code = "", verifier = "" } = req.body || {};
-    const result = await pool.query(
-      `SELECT c.*, p.full_name AS patient_name, p.phone AS patient_phone,
-              p.birth_date, ls.lab_name, ls.phone AS lab_phone, ls.email AS lab_email,
-              ls.address AS lab_address
-       FROM laboratory_cases c
-       LEFT JOIN laboratory_patients p ON p.id=c.patient_id
-       LEFT JOIN laboratory_settings ls ON ls.company_id=c.company_id
-       WHERE c.result_code=$1 AND c.result_published=true
-       LIMIT 1`,
-      [String(result_code).trim()]
-    );
-    const row = result.rows[0];
-    const verifierText = String(verifier || "").trim().toLowerCase();
-    const accepted =
-      row &&
-      (String(row.patient_phone || "").trim().toLowerCase() === verifierText ||
-        String(row.birth_date || "").slice(0, 10).toLowerCase() === verifierText);
-    await pool.query(
-      `INSERT INTO laboratory_result_access_logs
-       (company_id, case_id, result_code, verifier, success, ip_address, user_agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        row?.company_id || null,
-        row?.id || null,
-        result_code,
-        verifier,
-        Boolean(accepted),
-        req?.headers?.["x-forwarded-for"] || req?.ip || "",
-        req?.headers?.["user-agent"] || ""
-      ]
-    );
-    if (!accepted) return res.status(403).json({ error: "Code résultat ou vérification incorrect." });
-    const analyses = await pool.query("SELECT * FROM laboratory_case_analyses WHERE case_id=$1 ORDER BY id ASC", [row.id]);
-    res.json({ result: row, analyses: analyses.rows });
-  } catch (error) {
-    console.error("ERREUR VERIFY LAB RESULT :", error);
-    res.status(500).json({ error: "Erreur consultation résultat laboratoire" });
-  }
-});
+// HAFIYA public result verification is mounted by hafiya-extra-routes.js.
 
 app.get("/marketplace/cart", authenticateToken, async (req, res) => {
   try {

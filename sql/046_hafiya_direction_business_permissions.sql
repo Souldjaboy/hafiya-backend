@@ -4,15 +4,17 @@
 DO $$
 DECLARE
   direction_user_id INTEGER;
+  direction_matches INTEGER;
 BEGIN
-  SELECT id INTO direction_user_id
+  SELECT COUNT(*), MIN(id)
+  INTO direction_matches, direction_user_id
   FROM users
-  WHERE LOWER(email) = LOWER('hafiyamali2025@gmail.com')
-  ORDER BY id ASC
-  LIMIT 1;
+  WHERE id = 24
+    AND company_id = 1
+    AND LOWER(email) = LOWER('hafiyamali2025@gmail.com');
 
-  IF direction_user_id IS NULL THEN
-    RAISE EXCEPTION 'Compte Direction HAFIYA introuvable: hafiyamali2025@gmail.com';
+  IF direction_matches <> 1 OR direction_user_id IS NULL THEN
+    RAISE EXCEPTION 'ARRÊT : compte Direction HAFIYA attendu non trouvé exactement (id=24, company_id=1, email=hafiyamali2025@gmail.com).';
   END IF;
 
   UPDATE users
@@ -50,11 +52,7 @@ BEGIN
     ('salaires', 'Salaires', 'Gestion des salaires', true),
     ('reports', 'Rapports', 'Rapports et exports', true),
     ('pos', 'Caisse / POS', 'Encaissements et caisse', true)
-  ON CONFLICT (module_key) DO UPDATE SET
-    module_name = EXCLUDED.module_name,
-    description = EXCLUDED.description,
-    is_active = true,
-    updated_at = CURRENT_TIMESTAMP;
+  ON CONFLICT (module_key) DO NOTHING;
 
   INSERT INTO user_permissions
     (user_id, module_key, can_view, can_create, can_edit, can_delete, can_validate, updated_by, updated_at)
