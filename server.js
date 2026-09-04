@@ -384,13 +384,21 @@ function normalizeRole(role) {
 function isAdminUser(user) {
   const role = normalizeRole(user?.role);
   return (
-    user?.is_super_admin === true || role === "admin" || role === "super_admin"
+    user?.is_super_admin === true ||
+    role === "admin" ||
+    role === "super_admin" ||
+    isHafiyaDirection(user)
   );
 }
 
 function canAccessAdminSettings(user) {
   const role = normalizeRole(user?.role);
-  return user?.is_super_admin === true || role === "super_admin" || role === "admin";
+  return (
+    user?.is_super_admin === true ||
+    role === "super_admin" ||
+    role === "admin" ||
+    isHafiyaDirection(user)
+  );
 }
 
 function canAccessDirectionModule(user) {
@@ -437,6 +445,7 @@ function canValidateStockMovement(user) {
     user?.is_super_admin === true ||
     role === "admin" ||
     role === "super_admin" ||
+    isHafiyaDirection(user) ||
     role === "chef_entrepot" ||
     role === "chef d'entrepôt" ||
     role === "chef d'entrepot"
@@ -943,7 +952,11 @@ function authorizeRoles(...roles) {
     const allowed = roles.map(normalizeRole);
     const userRole = normalizeRole(req.user?.role);
 
-    if (req.user?.is_super_admin === true || allowed.includes(userRole)) {
+    if (
+      req.user?.is_super_admin === true ||
+      allowed.includes(userRole) ||
+      (isHafiyaDirection(req.user) && allowed.includes("admin"))
+    ) {
       return next();
     }
 
