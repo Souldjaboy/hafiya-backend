@@ -1,0 +1,26 @@
+name: Pointage Paie V2 Backend CI
+
+on:
+  push:
+    branches: [feature/hafiya-pointage-paie-v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Syntaxe routes V2
+        run: node --check hafiya-attendance-payroll-v2-routes.js
+      - name: Syntaxe extra routes
+        run: node --check hafiya-extra-routes.js
+      - name: Syntaxe initialisation
+        run: node --check scripts/initialize-hafiya-attendance-2026-09-01-to-2026-09-07.js
