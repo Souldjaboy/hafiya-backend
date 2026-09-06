@@ -273,4 +273,8 @@ module.exports = function(app, pool, authenticateToken) {
       return res.status(500).json({ error: "Erreur téléchargement résultat laboratoire" });
     }
   });
+
+  // Nouveau centre unifié Pointage & Paie HAFIYA. Les anciennes routes restent disponibles
+  // pour compatibilité ; l'interface V2 utilise uniquement ces routes cloisonnées par société.
+  require("./hafiya-attendance-payroll-v2-routes")(app, pool, authenticateToken);
 };
