@@ -22,10 +22,13 @@ patchFile("server.js", (s) => {
 });
 
 patchFile("hafiya-extra-routes.js", (s) => {
-  if (s.includes('require("./hafiya-kiosk-routes")')) return s;
   const anchor = '  require("./hafiya-attendance-payroll-v2-routes")(app, pool, authenticateToken);';
   if (!s.includes(anchor)) throw new Error("hafiya-extra-routes.js: ancre V2 introuvable");
-  return s.replace(anchor, `  require(\"./hafiya-kiosk-routes\")(app, pool, authenticateToken);\n${anchor}`);
+  let additions = "";
+  if (!s.includes('require("./hafiya-kiosk-routes")')) additions += '  require("./hafiya-kiosk-routes")(app, pool, authenticateToken);\n';
+  if (!s.includes('require("./hafiya-task-management-routes")')) additions += '  require("./hafiya-task-management-routes")(app, pool, authenticateToken);\n';
+  if (!additions) return s;
+  return s.replace(anchor, additions + anchor);
 });
 
 console.log("HAFIYA_KIOSK_PATCH=OK");
