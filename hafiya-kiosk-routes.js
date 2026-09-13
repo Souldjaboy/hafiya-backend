@@ -49,10 +49,11 @@ function guardDirection(req, res) {
   return true;
 }
 
+// Règle kiosque HAFIYA : 1er scan = début de travail, 2e scan = débauche.
+// Les anciens champs de pause restent en base pour compatibilité/historique, mais
+// ils ne participent plus à la progression automatique du kiosque.
 function nextAttendanceAction(row) {
   if (!row?.check_in) return "ARRIVEE";
-  if (!row?.break_out) return "DEPART_PAUSE";
-  if (!row?.break_in) return "RETOUR_PAUSE";
   if (!row?.check_out) return "DEBAUCHE";
   return "TERMINE";
 }
@@ -104,7 +105,7 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
         break_out: r.break_out,
         break_in: r.break_in,
         check_out: r.check_out,
-        status: r.check_out ? "Terminé" : r.break_out && !r.break_in ? "En pause" : r.check_in ? (Number(r.late_minutes || 0) > 0 ? "En retard" : "Présent") : "Absent",
+        status: r.check_out ? "Terminé" : r.check_in ? (Number(r.late_minutes || 0) > 0 ? "En retard" : "Présent") : "Absent",
         late_minutes: Number(r.late_minutes || 0)
       }));
 
@@ -119,7 +120,7 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
         employees,
         counters: {
           present: employees.filter((e) => ["Présent", "En retard"].includes(e.attendance?.status)).length,
-          pause: employees.filter((e) => e.attendance?.status === "En pause").length,
+          pause: 0,
           absent: employees.filter((e) => !e.attendance || e.attendance?.status === "Absent").length,
           finished: employees.filter((e) => e.attendance?.status === "Terminé").length
         },
@@ -230,18 +231,6 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
         attendance = (await client.query(
           `UPDATE attendance_records
            SET check_in=CURRENT_TIMESTAMP,status='Présent',source='kiosk_badge',updated_at=CURRENT_TIMESTAMP
-           WHERE id=$1 RETURNING *`, [attendance.id]
-        )).rows[0];
-      } else if (action === "DEPART_PAUSE") {
-        attendance = (await client.query(
-          `UPDATE attendance_records
-           SET break_out=CURRENT_TIMESTAMP,status='En pause',source='kiosk_badge',updated_at=CURRENT_TIMESTAMP
-           WHERE id=$1 RETURNING *`, [attendance.id]
-        )).rows[0];
-      } else if (action === "RETOUR_PAUSE") {
-        attendance = (await client.query(
-          `UPDATE attendance_records
-           SET break_in=CURRENT_TIMESTAMP,status='Présent',source='kiosk_badge',updated_at=CURRENT_TIMESTAMP
            WHERE id=$1 RETURNING *`, [attendance.id]
         )).rows[0];
       } else if (action === "DEBAUCHE") {
