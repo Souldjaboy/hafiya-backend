@@ -18735,7 +18735,9 @@ const hoteBiometrie = require("./biometrie/hote-hafiya")({
 const biometrieHafiya = creerRouteurBiometrie({
   hote: hoteBiometrie,
   service: creerServiceBiometrie({ pool, hote: hoteBiometrie }),
-  passkeys: creerPasskeys({ pool }),
+  /* Nom affiché par l'appareil lors d'une passkey : HAFIYA, jamais le nom
+     par défaut du noyau commun. */
+  passkeys: creerPasskeys({ pool, env: { ...process.env, WEBAUTHN_RP_NAME: process.env.WEBAUTHN_RP_NAME || "HAFIYA Laboratoire" } }),
   limiteur: require("./middleware/rateLimit").createRateLimiter({
     windowMs: 60 * 1000, max: 60, message: "Trop de tentatives biométriques : patientez une minute.",
   }),

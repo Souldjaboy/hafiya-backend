@@ -144,6 +144,8 @@ async function main() {
     await q(`UPDATE users SET verification_required = FALSE, account_status = 'active' WHERE id = $1`, [a.admin.id]);
     const cle = new AuthentificateurLogiciel({ origine: process.env.WEBAUTHN_ORIGINS.split(",")[0], rpId: process.env.WEBAUTHN_RP_ID });
     const o = await appel("POST", "/auth/passkeys/register/options", a.token, {});
+    verifier("l'appareil affiche HAFIYA, pas le nom d'un autre produit", /HAFIYA/.test(o.data?.rp?.name || "")
+      && !/MaliLink/i.test(o.data?.rp?.name || ""), JSON.stringify(o.data?.rp));
     const r = await appel("POST", "/auth/passkeys/register/verify", a.token, { response: cle.creer(o.data), name: "Téléphone Direction" });
     verifier("passkey enregistrée", r.status === 201, JSON.stringify(r.data));
     const lo = await appel("POST", "/auth/passkeys/login/options", null, {});
