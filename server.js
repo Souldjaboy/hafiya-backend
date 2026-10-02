@@ -53,7 +53,14 @@ app.use(
   })
 )
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  /* Corps brut conservé pour la SEULE route signée par les terminaux
+     biométriques : la signature HMAC porte sur les octets reçus. */
+  verify: (req, res, buf) => {
+    if (String(req.originalUrl || req.url || "").includes("/biometrics/devices/events")) req.rawBody = Buffer.from(buf);
+  },
+}));
 
 app.use((req, res, next) => {
   if (req.url.startsWith("/api/")) {
@@ -18713,6 +18720,43 @@ app.post("/disbursement-requests/:id/close", authenticateToken, async (req, res)
   }
 });
 
+
+// Biométrie et passkeys : noyau commun (biometrie/, identique à MaliLink et
+// Triangle), adaptateur HAFIYA. Module « biometrie » fermé par défaut pour
+// chaque société (migration 051) ; gabarits chiffrés par BIOMETRIC_ENC_KEY.
+const pointageEngineHafiya = require("./services/pointage-engine");
+const { creerServiceBiometrie } = require("./biometrie/core/service");
+const { creerPasskeys } = require("./biometrie/passkeys");
+const { creerRouteurBiometrie } = require("./biometrie/routes");
+const hoteBiometrie = require("./biometrie/hote-hafiya")({
+  pool, authenticateToken, getEffectiveCompanyId, isSuperAdminUser, normalizeRole,
+  pointageEngine: pointageEngineHafiya, finaliserConnexionParId, logAudit,
+});
+const biometrieHafiya = creerRouteurBiometrie({
+  hote: hoteBiometrie,
+  service: creerServiceBiometrie({ pool, hote: hoteBiometrie }),
+  passkeys: creerPasskeys({ pool }),
+  limiteur: require("./middleware/rateLimit").createRateLimiter({
+    windowMs: 60 * 1000, max: 60, message: "Trop de tentatives biométriques : patientez une minute.",
+  }),
+});
+/* Module de la société : la biométrie ne s'ouvre que si company_modules
+   l'active (les terminaux signés passent : l'appareil porte sa société). */
+app.use("/biometrics", async (req, res, next) => {
+  if (req.path.startsWith("/devices/events")) return next();
+  const entete = req.headers.authorization || "";
+  let user = null;
+  try { user = entete.startsWith("Bearer ") ? jwt.verify(entete.slice(7), JWT_SECRET) : null; } catch { user = null; }
+  if (!user || isSuperAdminUser(user)) return next();
+  const { rows } = await pool.query(
+    `SELECT 1 FROM company_modules WHERE company_id = $1 AND module_key = 'biometrie'
+        AND COALESCE(enabled, is_enabled, FALSE) = TRUE LIMIT 1`, [user.company_id]).catch(() => ({ rows: [] }));
+  if (!rows[0]) {
+    return res.status(403).json({ error: "Module « biometrie » non disponible pour votre entreprise.", code: "MODULE_DISABLED", module: "biometrie" });
+  }
+  return next();
+});
+app.use("/", biometrieHafiya.router);
 
 try {
   require("./hafiya-extra-routes")(app, pool, authenticateToken);

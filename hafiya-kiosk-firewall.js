@@ -4,6 +4,10 @@ const jwt = require("jsonwebtoken");
 
 const ALLOWED_PREFIXES = [
   "/hafiya/kiosk/",
+  // Pointage « badge + visage » depuis la tablette : défi puis vérification.
+  "/biometrics/challenges",
+  "/biometrics/attendance",
+  "/biometrics/config",
   "/auth/",
   "/login",
   "/me",
