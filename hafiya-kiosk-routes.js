@@ -1,5 +1,39 @@
 "use strict";
 
+const pointageEngine = require("./services/pointage-engine");
+
+/* Badge lu au kiosque : le QR porte { badge_token } (jeton aléatoire,
+   users.badge_qr_token). L'ancien { badge_code } (HAFIYA-EMP-<id>, devinable)
+   identifie encore une personne pour AFFICHER ses tâches, mais ne vaut plus
+   pointage. */
+function lireBadge(corps) {
+  const brut = String(corps?.badge_token || corps?.badge || corps?.badge_code || "").trim();
+  if (!brut) return { jeton: "", code: "" };
+  try {
+    const objet = JSON.parse(brut);
+    if (objet && typeof objet === "object") {
+      return { jeton: String(objet.badge_token || "").trim(), code: String(objet.badge_code || "").trim() };
+    }
+  } catch { /* texte brut */ }
+  return /^HAFIYA-EMP-/i.test(brut) ? { jeton: "", code: brut } : { jeton: brut, code: "" };
+}
+
+async function resoudreEmploye(db, cid, corps, { pourPointer }) {
+  const { jeton, code } = lireBadge(corps);
+  const colonnes = `id,fullname,role,badge_code,profile_image_url`;
+  const filtre = `company_id=$1 AND COALESCE(is_active,true)=true
+           AND LOWER(COALESCE(role,'')) NOT IN ('super_admin','kiosk_pointage','customer','client','patient')`;
+  if (jeton) {
+    const r = await db.query(`SELECT ${colonnes} FROM users WHERE ${filtre} AND badge_qr_token=$2 LIMIT 1`, [cid, jeton]);
+    if (r.rows[0]) return { employe: r.rows[0] };
+  }
+  if (code) {
+    const r = await db.query(`SELECT ${colonnes} FROM users WHERE ${filtre} AND badge_code=$2 LIMIT 1`, [cid, code]);
+    if (r.rows[0]) return pourPointer ? { obsolete: true } : { employe: r.rows[0] };
+  }
+  return {};
+}
+
 function roleOf(user) {
   return String(user?.role || "").trim().toLowerCase();
 }
@@ -144,17 +178,9 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
     try {
       if (!guardKiosk(req, res)) return;
       const cid = companyId(req);
-      const badge = String(req.body?.badge_code || "").trim();
-      if (!badge) return res.status(400).json({ error: "Badge obligatoire." });
-
-      const employee = (await pool.query(
-        `SELECT id, fullname, role, badge_code, profile_image_url
-         FROM users
-         WHERE company_id=$1 AND badge_code=$2 AND COALESCE(is_active,true)=true
-           AND LOWER(COALESCE(role,'')) NOT IN ('super_admin','kiosk_pointage')
-         LIMIT 1`,
-        [cid, badge]
-      )).rows[0];
+      const lu = lireBadge(req.body);
+      if (!lu.jeton && !lu.code) return res.status(400).json({ error: "Badge obligatoire." });
+      const { employe: employee } = await resoudreEmploye(pool, cid, req.body, { pourPointer: false });
       if (!employee) return res.status(404).json({ error: "Badge inconnu pour HAFIYA." });
 
       const attendance = (await pool.query(
@@ -191,62 +217,51 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
     try {
       if (!guardKiosk(req, res)) return;
       const cid = companyId(req);
-      const badge = String(req.body?.badge_code || "").trim();
-      if (!badge) return res.status(400).json({ error: "Badge obligatoire." });
-
-      const employee = (await client.query(
-        `SELECT id,fullname,role,badge_code,profile_image_url
-         FROM users
-         WHERE company_id=$1 AND badge_code=$2 AND COALESCE(is_active,true)=true
-           AND LOWER(COALESCE(role,'')) NOT IN ('super_admin','kiosk_pointage')
-         LIMIT 1`,
-        [cid, badge]
-      )).rows[0];
+      const lu = lireBadge(req.body);
+      if (!lu.jeton && !lu.code) return res.status(400).json({ error: "Badge obligatoire." });
+      const trouve = await resoudreEmploye(client, cid, req.body, { pourPointer: true });
+      if (trouve.obsolete) {
+        return res.status(409).json({ error: "Badge ancien format : réimprimez le badge (page Badges).", code: "BADGE_OBSOLETE" });
+      }
+      const employee = trouve.employe;
       if (!employee) return res.status(404).json({ error: "Badge inconnu pour HAFIYA." });
 
-      await client.query("BEGIN");
+      /* Deux lectures à quelques secondes d'écart sont UN geste : sans cette
+         garde, un double scan pointait l'arrivée puis le départ. */
+      const recent = (await client.query(
+        `SELECT 1 FROM attendance_history WHERE user_id=$1 AND company_id=$2
+            AND created_at > CURRENT_TIMESTAMP - ($3 || ' seconds')::interval LIMIT 1`,
+        [employee.id, cid, String(pointageEngine.ANTI_REBOND_SECONDES)])).rows[0];
       let attendance = (await client.query(
-        `SELECT * FROM attendance_records
-         WHERE company_id=$1 AND user_id=$2 AND work_date=CURRENT_DATE
-           AND COALESCE(is_cancelled,false)=false
-         FOR UPDATE`,
-        [cid, employee.id]
-      )).rows[0];
-
-      if (!attendance) {
+        `SELECT * FROM attendance_records WHERE user_id=$1 AND work_date=CURRENT_DATE LIMIT 1`, [employee.id])).rows[0] || null;
+      let action = nextAttendanceAction(attendance || {});
+      let statut = "deja_enregistre";
+      if (!recent) {
+        if (action === "TERMINE") {
+          return res.status(409).json({ error: "La journée est déjà terminée pour cet employé." });
+        }
+        let r;
+        try {
+          r = await pointageEngine.enregistrerPointage(pool, {
+            companyId: cid, userId: employee.id, action: action === "ARRIVEE" ? "checkin" : "checkout",
+            methode: "QR", tenantId: "hafiya", createdBy: req.user.id,
+            metadata: { source: "kiosk_badge", device_info: String(req.body?.device_info || "tablette HAFIYA").slice(0, 200) },
+          });
+        } catch (e) {
+          if (e instanceof pointageEngine.PointageError) return res.status(e.httpStatus).json({ error: e.message, code: e.code });
+          throw e;
+        }
+        statut = r.statut;
         attendance = (await client.query(
-          `INSERT INTO attendance_records(user_id,company_id,work_date,status,source)
-           VALUES($1,$2,CURRENT_DATE,'Absent','kiosk_badge') RETURNING *`,
-          [employee.id, cid]
-        )).rows[0];
+          `UPDATE attendance_records SET source='kiosk_badge' WHERE id=$1 RETURNING *`, [r.fiche.id])).rows[0];
+        await client.query(
+          `INSERT INTO hafiya_kiosk_audit(company_id,user_id,badge_code,action_type,performed_by,device_info)
+           VALUES($1,$2,$3,$4,$5,$6)`,
+          [cid, employee.id, employee.badge_code || "", action, req.user.id, String(req.body?.device_info || "tablette HAFIYA")]
+        );
+      } else {
+        action = attendance?.check_out ? "DEBAUCHE" : "ARRIVEE";
       }
-
-      const action = nextAttendanceAction(attendance);
-      if (action === "TERMINE") {
-        await client.query("ROLLBACK");
-        return res.status(409).json({ error: "La journée est déjà terminée pour cet employé." });
-      }
-
-      if (action === "ARRIVEE") {
-        attendance = (await client.query(
-          `UPDATE attendance_records
-           SET check_in=CURRENT_TIMESTAMP,status='Présent',source='kiosk_badge',updated_at=CURRENT_TIMESTAMP
-           WHERE id=$1 RETURNING *`, [attendance.id]
-        )).rows[0];
-      } else if (action === "DEBAUCHE") {
-        attendance = (await client.query(
-          `UPDATE attendance_records
-           SET check_out=CURRENT_TIMESTAMP,status='Terminé',source='kiosk_badge',updated_at=CURRENT_TIMESTAMP
-           WHERE id=$1 RETURNING *`, [attendance.id]
-        )).rows[0];
-      }
-
-      await client.query(
-        `INSERT INTO hafiya_kiosk_audit(company_id,user_id,badge_code,action_type,performed_by,device_info)
-         VALUES($1,$2,$3,$4,$5,$6)`,
-        [cid, employee.id, badge, action, req.user.id, String(req.body?.device_info || "tablette HAFIYA")]
-      );
-      await client.query("COMMIT");
 
       const tasks = await pool.query(
         `SELECT id,assigned_to,title,description,priority,due_date,status,completed_at
@@ -258,10 +273,11 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
 
       res.json({
         success: true,
+        statut,
         employee: publicEmployee(employee),
         action,
         attendance,
-        next_action: nextAttendanceAction(attendance),
+        next_action: nextAttendanceAction(attendance || {}),
         tasks: tasks.rows
       });
     } catch (error) {
@@ -344,13 +360,14 @@ module.exports = function registerHafiyaKioskRoutes(app, pool, authenticateToken
     try {
       if (!guardKiosk(req, res)) return;
       const cid = companyId(req);
-      const badge = String(req.body?.badge_code || "").trim();
+      const lu = lireBadge(req.body);
+      const badge = lu.jeton || lu.code;
       const status = String(req.body?.status || "").trim();
       if (!badge || !["a_faire", "en_cours", "termine"].includes(status)) {
         return res.status(400).json({ error: "Badge et statut valides obligatoires." });
       }
       const employee = (await pool.query(
-        `SELECT id FROM users WHERE company_id=$1 AND badge_code=$2 AND COALESCE(is_active,true)=true LIMIT 1`,
+        `SELECT id FROM users WHERE company_id=$1 AND (badge_qr_token=$2 OR badge_code=$2) AND COALESCE(is_active,true)=true LIMIT 1`,
         [cid, badge]
       )).rows[0];
       if (!employee) return res.status(404).json({ error: "Badge non reconnu." });
