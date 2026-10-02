@@ -2320,7 +2320,7 @@ app.post("/login", async (req, res) => {
 });
 
 /* La même requête pour toutes les méthodes de connexion. */
-const SELECT_UTILISATEUR_CONNEXION = `SELECT 
+const SELECT_UTILISATEUR_CONNEXION = `SELECT
         u.*,
         c.name AS company_name,
         c.status AS company_status,
